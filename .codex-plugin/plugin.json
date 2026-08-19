@@ -1,0 +1,11 @@
+{
+  "name": "codex-pro-planning-bridge",
+  "version": "0.1.0",
+  "description": "Bridge Codex with ChatGPT Pro for advanced project planning.",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Pro Planning Bridge",
+    "shortDescription": "Generate ChatGPT Pro planning requests from repositories.",
+    "category": "Developer Tools"
+  }
+}
