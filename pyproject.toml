@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-pro-planning-bridge"
+version = "0.1.0"
+description = "Local-first bridge for generating ChatGPT Pro architecture planning requests."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "qihan-bot" }]
+keywords = ["codex", "chatgpt", "planning", "architecture", "developer-tools"]
+dependencies = []
+
+[project.scripts]
+codex-pro-planning-bridge = "codex_pro_planning_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
