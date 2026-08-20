@@ -175,7 +175,7 @@ def iter_project_files(
 
 
 def _status_path(line: str) -> str:
-    path = line[3:].strip() if len(line) >= 3 else line.strip()
+    path = line[2:].strip() if len(line) >= 2 else line.strip()
     if " -> " in path:
         path = path.rsplit(" -> ", 1)[-1]
     return path.strip().strip('"').replace("\\", "/")
@@ -254,7 +254,7 @@ def _status_changes(output: str | None) -> list[FileChange]:
         if len(line) < 3:
             continue
         code = line[:2].strip()
-        path = line[3:].strip().strip('"').replace("\\", "/")
+        path = line[2:].strip().strip('"').replace("\\", "/")
         if " -> " in path:
             previous, current = path.rsplit(" -> ", 1)
             changes.append(FileChange(status="R", previous_path=previous, path=current))

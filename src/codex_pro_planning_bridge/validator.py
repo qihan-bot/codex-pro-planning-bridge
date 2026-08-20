@@ -12,6 +12,7 @@ from .facts import (
     build_repository_facts,
     normalize_dependency,
 )
+from .intelligence.symbol_index import SymbolIndex, build_symbol_index
 from .models import FactFinding
 from .plan import ValidationResult, validate_plan as validate_markdown
 from .repository import resolve_repo, resolve_repo_path, write_text
@@ -185,11 +186,21 @@ def extract_dependency_references(markdown: str) -> list[DependencyReference]:
     return sorted(references.values(), key=lambda item: item.name.casefold())
 
 
-def check_symbols(facts: RepositoryFacts, references: list[str]) -> list[Finding]:
+def check_symbols(
+    facts: RepositoryFacts,
+    references: list[str],
+    *,
+    index: SymbolIndex | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
     for reference in references:
-        found = facts.has_symbol(reference)
-        possible_matches = () if found else tuple(facts.find_symbol_matches(reference))
+        indexed_matches = index.find(reference) if index is not None else []
+        found = facts.has_symbol(reference) or bool(indexed_matches)
+        possible_matches = () if found else tuple(
+            index.possible_matches(reference)
+            if index is not None
+            else facts.find_symbol_matches(reference)
+        )
         detail = "symbol was found in the local source index"
         if not found:
             detail = "symbol was not found in the local source index"
@@ -374,9 +385,14 @@ def validate(
         extra_errors.append(f"PLAN.md not found: `{plan_path}`")
 
     facts = build_repository_facts(root)
+    symbol_index = build_symbol_index(root)
     path_checks = check_paths(root, extract_path_references(markdown))
     module_findings = check_modules(facts, extract_module_references(markdown))
-    symbol_findings = check_symbols(facts, extract_symbol_references(markdown))
+    symbol_findings = check_symbols(
+        facts,
+        extract_symbol_references(markdown),
+        index=symbol_index,
+    )
     dependency_findings = check_dependencies(facts, extract_dependency_references(markdown))
     report = _report(
         root,

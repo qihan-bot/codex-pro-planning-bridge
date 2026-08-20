@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from codex_pro_planning_bridge.diff import compare_plan, diff_plan, render_plan_diff
+from codex_pro_planning_bridge.intelligence.symbol_index import Symbol, SymbolIndex
 
 
 PLAN = """# Plan
@@ -75,6 +76,45 @@ class PlanDiffTests(unittest.TestCase):
             self.assertTrue(report_path.is_file())
             self.assertFalse(result.ok)
             self.assertIn("DRIFT DETECTED", report_path.read_text(encoding="utf-8"))
+
+    def test_compare_plan_reports_symbol_movement_between_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            before = SymbolIndex(
+                symbols=[
+                    Symbol(
+                        name="refresh",
+                        qualified_name="UserService.refresh",
+                        kind="method",
+                        path="src/old_service.py",
+                        line=4,
+                        language="python",
+                    )
+                ]
+            )
+            after = SymbolIndex(
+                symbols=[
+                    Symbol(
+                        name="refresh",
+                        qualified_name="UserService.refresh",
+                        kind="method",
+                        path="src/service.py",
+                        line=4,
+                        language="python",
+                    )
+                ]
+            )
+
+            result = compare_plan(
+                root,
+                PLAN,
+                changed_files=["src/service.py"],
+                baseline_symbol_index=before,
+                current_symbol_index=after,
+            )
+
+            self.assertEqual(result.symbol_changes[0].kind, "moved")
+            self.assertIn("## Symbol Changes", render_plan_diff(result))
 
 
 if __name__ == "__main__":
