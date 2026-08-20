@@ -73,6 +73,7 @@ class WorkflowSnapshotTests(unittest.TestCase):
             self.assertEqual(payload["approval"]["plan_sha256"], payload["plan"]["sha256"])
             self.assertEqual(payload["approval"]["approved_by"], "human-reviewer")
             self.assertEqual(payload["memory"]["version"], 1)
+            self.assertEqual(payload["memory"]["schema_version"], 2)
             self.assertEqual(
                 (root / ".codex" / "workflow" / "snapshots" / "latest.json").read_bytes(),
                 record.path.read_bytes(),

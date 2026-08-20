@@ -46,17 +46,20 @@ def _relative_path(root: Path, path: Path | None) -> str | None:
         return str(path)
 
 
-def _memory_version(root: Path) -> object:
+def _memory_metadata(root: Path) -> dict[str, object]:
     """Read memory metadata without creating or migrating project memory."""
 
     metadata_path = root / MEMORY_METADATA_FILE
     if not metadata_path.is_file():
-        return None
+        return {"version": None, "schema_version": None}
     metadata = ProjectMemory(root).metadata()
     value = metadata.get("version")
     if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return value
+        value = int(value)
+    return {
+        "version": value,
+        "schema_version": metadata.get("schema_version"),
+    }
 
 
 @dataclass(frozen=True)
@@ -184,9 +187,7 @@ class SnapshotManager:
                 "commit": repository_commit,
                 "dirty": repository_dirty,
             },
-            "memory": {
-                "version": _memory_version(self.root),
-            },
+            "memory": _memory_metadata(self.root),
         }
 
     def create(self) -> SnapshotRecord:
