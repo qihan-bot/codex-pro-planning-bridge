@@ -1,7 +1,6 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.3.2 Hardening** (`0.3.2`); v0.3.3 Reliability Layer
-is in progress with the Workflow Snapshot Manager.
+Release status: **v0.3.3 Reliability Layer** (`v0.3.3-beta`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
@@ -12,10 +11,12 @@ v0.3 turns those components into a recoverable planning loop. The published
 gate before implementation, workflow recovery commands, and a local symbol
 relationship graph. v0.3.2 hardens that boundary with approval hash binding,
 read-only event queries, auditable workflow rollback, and broader graph tests.
-Workflow state and transition history remain persisted locally, and the bridge
-pauses at the explicit Codex implementation boundary. It still has no OpenAI
-API integration, browser scraping, API key configuration, or autonomous
-source-code modification.
+`v0.3.3-beta` completes the reliability layer with versioned runtime snapshots,
+fail-closed recovery, pre-resume integrity checks, and an explicit approval
+lifecycle. Workflow state and transition history remain persisted locally, and
+the bridge pauses at the explicit Codex implementation boundary. It still has
+no OpenAI API integration, browser scraping, API key configuration, or
+autonomous source-code modification.
 
 ## Complete planning loop
 
@@ -116,6 +117,13 @@ cpb rollback --repo . --to 3 --reason "retry validation"
 cpb snapshot create --repo .
 cpb snapshot list --repo .
 cpb snapshot show --repo . --id latest
+
+# Restore only workflow metadata from a validated snapshot.
+cpb recover --repo . --snapshot latest
+
+# Optional approval validity window and explicit revocation.
+cpb approve --repo . --plan .codex/pro-plan/PLAN.md --approved-by user --expires-in 3600
+cpb approve --repo . --revoke --reason "plan needs another review"
 ```
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
@@ -174,7 +182,7 @@ restores only workflow metadata to event `N` and appends a
 `WORKFLOW_ROLLBACK` event, preserving all earlier audit records and repository
 files.
 
-### v0.3.3 Reliability Layer: Snapshot Manager
+### v0.3.3 Reliability Layer: Runtime snapshots and recovery
 
 The first v0.3.3 component captures a complete local runtime context under
 `.codex/workflow/snapshots/`. Numbered JSON files such as
@@ -186,8 +194,21 @@ Memory version.
 
 Snapshot creation is read-only with respect to source files, `PLAN.md`,
 approval artifacts, event records, and Project Memory; it only writes the new
-numbered snapshot and `latest.json`. Recovery, integrity checking, and the
-approval lifecycle remain separate follow-up phases of v0.3.3.
+numbered snapshot and `latest.json`. `cpb recover` validates the selected
+snapshot, restores workflow metadata, and appends a compensating
+`WORKFLOW_RECOVERED` event without deleting history or changing source files.
+
+`cpb resume` runs a read-only Workflow Integrity check before advancing the
+loop. It compares state, event position, plan path and hash, approval binding,
+Git commit/dirty state, and Project Memory metadata. A failed check prints an
+actionable diagnostic and blocks resume. `cpb pause` creates a runtime
+snapshot baseline automatically so a paused workflow has a recoverable context.
+
+Approval records expose `APPROVED`, `INVALIDATED`, `EXPIRED`, and `REVOKED`
+statuses. Editing the plan invalidates its hash binding, `--expires-in` creates
+a local validity window, and `--revoke` records an explicit revocation. Only
+an effective approval whose path and SHA-256 match the current plan can enter
+the implementation state.
 
 The local repository intelligence layer is in
 `src/codex_pro_planning_bridge/intelligence/symbol_index.py` and
@@ -232,6 +253,8 @@ src/codex_pro_planning_bridge/
 ├── approval.py    # explicit PLAN.md approval records
 ├── state.py       # versioned state/history/event persistence
 ├── snapshot.py    # immutable workflow runtime snapshots
+├── recovery.py    # fail-closed metadata recovery from snapshots
+├── integrity.py   # read-only pre-resume runtime checks
 ├── workflow.py    # explicit transition rules
 ├── loop.py        # context → validation → review orchestration
 └── intelligence/
@@ -286,7 +309,7 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] v0.3 Planning Loop
 - [x] v0.3.1 Planning Safety Layer (`v0.3.1-beta`)
 - [x] v0.3.2 Hardening (`v0.3.2`)
-- [ ] v0.3.3 Reliability Layer (in progress: Snapshot Manager / Issue #8)
+- [x] v0.3.3 Reliability Layer (`v0.3.3-beta`)
 
 ## License
 

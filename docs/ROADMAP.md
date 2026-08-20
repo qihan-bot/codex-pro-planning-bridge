@@ -234,6 +234,35 @@ automation, autonomous source modification, or bypassing human approval.
 
 ---
 
+# v0.3.3 Reliability Layer
+
+Status: Beta (`v0.3.3-beta`)
+
+Goal:
+
+Make the Workflow Runtime recoverable, verifiable, and auditable before
+introducing multi-agent planning.
+
+Features:
+
+- versioned JSON-only Workflow Snapshots with immutable numbered records and a
+  deterministic `latest.json` pointer;
+- fail-closed `cpb recover` that restores workflow metadata and appends a
+  compensating recovery event;
+- read-only Workflow Integrity checks that run before `cpb resume` and verify
+  state, history position, plan and approval hashes, Git state, and Project
+  Memory metadata;
+- approval lifecycle statuses: `APPROVED`, `INVALIDATED`, `EXPIRED`, and
+  `REVOKED`, with optional local expiry and explicit revocation events; and
+- automatic snapshot baselines after `cpb pause`.
+
+The release remains local-first: no OpenAI API calls, API keys, browser
+automation, autonomous source modification, or bypassing human approval.
+Security scanning and runtime metrics are intentionally deferred to a later
+hardening release.
+
+---
+
 # v1.0 AI Software Architect Layer
 
 Final vision:
