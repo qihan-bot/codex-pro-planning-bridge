@@ -104,6 +104,23 @@ class ProjectMemoryTests(unittest.TestCase):
             self.assertIn("Existing decision", memory.document("decisions").content)
             self.assertEqual(memory.document("issues").key, "known-issues")
 
+    def test_memory_schema_migration_is_recorded_without_rewriting_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            memory = ProjectMemory(root)
+            memory.initialize()
+            metadata_path = root / ".codex" / "project-memory" / "memory.json"
+            metadata_path.write_text(
+                json.dumps({"version": "1", "entries": 0}),
+                encoding="utf-8",
+            )
+
+            migrated = memory.migrate()
+
+            self.assertEqual(len(migrated), 1)
+            self.assertTrue(migrated[0].is_file())
+            self.assertIn("migrations", migrated[0].read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

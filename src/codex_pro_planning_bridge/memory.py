@@ -18,8 +18,10 @@ from .repository import resolve_repo, resolve_repo_path, write_text
 
 MEMORY_DIRECTORY = Path(".codex/project-memory")
 ADR_DIRECTORY = MEMORY_DIRECTORY / "adr"
+MIGRATIONS_DIRECTORY = MEMORY_DIRECTORY / "migrations"
 MEMORY_METADATA_FILE = MEMORY_DIRECTORY / "memory.json"
 MEMORY_VERSION = "1"
+MEMORY_SCHEMA_VERSION = 2
 MEMORY_FILES = {
     "architecture": "architecture.md",
     "decisions": "decisions.md",
@@ -108,19 +110,67 @@ class ProjectMemory:
         self.root = resolve_repo(repo)
         self.directory = self.root / MEMORY_DIRECTORY
         self.adr_directory = self.root / ADR_DIRECTORY
+        self.migrations_directory = self.root / MIGRATIONS_DIRECTORY
         self.metadata_path = self.root / MEMORY_METADATA_FILE
 
     def initialize(self, *, overwrite: bool = False) -> list[Path]:
         """Create missing base documents and initialize or migrate metadata."""
 
         created: list[Path] = []
+        self.migrate()
         for key, filename in MEMORY_FILES.items():
             path = self.directory / filename
             if overwrite or not path.exists():
                 write_text(path, MEMORY_TEMPLATES[key])
                 created.append(path)
         self.adr_directory.mkdir(parents=True, exist_ok=True)
+        self.migrations_directory.mkdir(parents=True, exist_ok=True)
         self._refresh_metadata()
+        return created
+
+    def migrate(self) -> list[Path]:
+        """Apply file-backed memory schema migrations without changing content.
+
+        v0.2 metadata only carried ``version``.  v0.3 adds an explicit schema
+        number and a human-readable migrations directory while keeping the
+        legacy version value stable for compatibility.
+        """
+
+        if not self.metadata_path.is_file():
+            return []
+        try:
+            value = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            value = {}
+        if not isinstance(value, dict):
+            value = {}
+        try:
+            current = int(value.get("schema_version", 1))
+        except (TypeError, ValueError):
+            current = 1
+        if current > MEMORY_SCHEMA_VERSION:
+            raise ValueError(
+                f"memory schema {current} is newer than supported schema "
+                f"{MEMORY_SCHEMA_VERSION}"
+            )
+        created: list[Path] = []
+        if current < 2:
+            migration = self.migrations_directory / "0002-add-versioned-migrations.md"
+            if not migration.exists():
+                write_text(
+                    migration,
+                    "\n".join(
+                        [
+                            "# Memory Migration 0002",
+                            "",
+                            "Add an explicit memory schema version and a Git-friendly "
+                            "`migrations/` directory.",
+                            "",
+                            "The legacy `version` field remains `1` for compatibility.",
+                        ]
+                    ),
+                )
+                created.append(migration)
         return created
 
     def document(self, document: str) -> MemoryDocument:
@@ -170,6 +220,7 @@ class ProjectMemory:
         if not self.metadata_path.is_file():
             return {
                 "version": MEMORY_VERSION,
+                "schema_version": MEMORY_SCHEMA_VERSION,
                 "updated": None,
                 "entries": len(self.list_adrs()),
             }
@@ -178,6 +229,7 @@ class ProjectMemory:
         except (OSError, ValueError):
             return {
                 "version": MEMORY_VERSION,
+                "schema_version": MEMORY_SCHEMA_VERSION,
                 "updated": None,
                 "entries": len(self.list_adrs()),
             }
@@ -186,10 +238,12 @@ class ProjectMemory:
     def _refresh_metadata(self) -> Path:
         payload = {
             "version": MEMORY_VERSION,
+            "schema_version": MEMORY_SCHEMA_VERSION,
             "updated": _now().isoformat(),
             "entries": len(self.list_adrs()),
             "documents": list(MEMORY_FILES.values()),
             "adr_directory": ADR_DIRECTORY.as_posix(),
+            "migrations_directory": MIGRATIONS_DIRECTORY.as_posix(),
         }
         return write_text(
             self.metadata_path,

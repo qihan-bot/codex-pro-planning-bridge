@@ -11,6 +11,7 @@ from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
 from .diff import diff_plan, render_plan_diff
 from .handoff import open_chat
+from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
 from .validator import validate as validate_repository
@@ -84,6 +85,26 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("--base", default=None, help="Git commit/ref to compare against")
     diff_parser.add_argument("--format", choices=("text", "json"), default="text")
 
+    loop_parser = subparsers.add_parser(
+        "loop",
+        help="advance the recoverable local planning workflow",
+    )
+    _add_repo_option(loop_parser)
+    loop_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
+    loop_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    loop_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
+    loop_parser.add_argument(
+        "--review",
+        action="store_true",
+        help="review local implementation drift and update project memory",
+    )
+    loop_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="start a new workflow while retaining local history",
+    )
+    loop_parser.add_argument("--format", choices=("text", "json"), default="text")
+
     memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
 
@@ -97,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     memory_list = memory_subparsers.add_parser("list", help="list ADR entries and memory metadata")
     _add_repo_option(memory_list)
+
+    memory_migrate = memory_subparsers.add_parser(
+        "migrate",
+        help="apply local project-memory schema migrations",
+    )
+    _add_repo_option(memory_migrate)
 
     memory_write = memory_subparsers.add_parser("write", help="write or append a memory document")
     _add_repo_option(memory_write)
@@ -209,6 +236,26 @@ def _run(args: argparse.Namespace) -> int:
             print(f"Wrote {report_path}")
         return 0 if result.ok else 1
 
+    if args.command == "loop":
+        loop_result = run_loop(
+            args.repo,
+            goal=args.user_request,
+            plan=args.plan,
+            base=args.base,
+            review=args.review,
+            reset=args.reset,
+        )
+        if args.format == "json":
+            print(json.dumps(loop_result.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(f"Workflow state: {loop_result.state.value}")
+            for message in loop_result.messages:
+                print(f"- {message}")
+            print(f"Next action: {loop_result.next_action}")
+            for name, path in loop_result.artifacts.items():
+                print(f"- {name}: {path}")
+        return 0 if loop_result.ok else 1
+
     if args.command == "memory":
         memory = ProjectMemory(args.repo)
         if args.memory_command == "init":
@@ -231,6 +278,14 @@ def _run(args: argparse.Namespace) -> int:
             print(f"ADR entries: {metadata.get('entries', len(memory.list_adrs()))}")
             for entry in memory.list_adrs():
                 print(f"- {entry.key}: {entry.path.relative_to(memory.root).as_posix()}")
+            return 0
+        if args.memory_command == "migrate":
+            paths = memory.migrate()
+            if paths:
+                for path in paths:
+                    print(f"Created {path}")
+            else:
+                print(f"Project memory is already at the supported schema at {memory.directory}")
             return 0
         if args.memory_command == "write":
             path = memory.write(args.document, args.content, append=args.append)
