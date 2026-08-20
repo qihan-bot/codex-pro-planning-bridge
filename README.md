@@ -51,6 +51,15 @@ python scripts/validate_plan.py
 
 The scripts create `.codex/pro-plan/` with `repo-tree.txt`, `git-status.txt`, `project-context.md`, `REQUEST.md`, and (after validation) `VALIDATION_REPORT.md`. The generated directory is ignored by Git by default because it may contain project-specific planning context.
 
+`validate_plan.py` performs local static checks for:
+
+- referenced paths and repository ownership
+- import-style modules
+- classes, functions, methods, and API symbols discoverable from source
+- declared dependencies and common framework aliases
+
+Findings are grouped as `ERROR`, `WARN`, or `OK`. The validator never executes project code and falls back to a live local scan when the supporting context artifacts are missing.
+
 The same commands work without installation from a checkout:
 
 ```bash
@@ -86,6 +95,7 @@ The project is packaged with `pyproject.toml` and exposes the `codex-pro-plannin
 - [x] Context collector
 - [x] Prompt generator
 - [x] Plan validator
+- [x] v0.2 Plan Validator: repository fact checks for paths, modules, symbols, and dependencies
 - [ ] Project memory and architecture review loop
 
 ## License

@@ -115,6 +115,97 @@ Confirm the rollout sequence.
             self.assertTrue(passed)
             self.assertIn("PASS", report_path.read_text(encoding="utf-8"))
 
+    def test_plan_validator_reports_missing_symbols_and_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "src"
+            source.mkdir()
+            (source / "service.py").write_text(
+                "class UserService:\n    def refresh_token(self):\n        return True\n",
+                encoding="utf-8",
+            )
+            plan_dir = root / ".codex" / "pro-plan"
+            plan_dir.mkdir(parents=True)
+            (plan_dir / "PLAN.md").write_text(
+                """# Plan
+
+## Summary
+Add a token refresh flow.
+
+## Assumptions and Constraints
+The existing service remains the integration point.
+
+## Architecture / Design
+Update `src/service.py` and use FastAPI.
+
+## Implementation Steps
+1. Add `UserService.refreshToken()`.
+2. Add the FastAPI integration.
+3. Add tests for the new endpoint.
+
+## Testing and Validation
+Run the unit tests.
+
+## Risks and Open Questions
+Confirm the framework choice.
+""",
+                encoding="utf-8",
+            )
+
+            report_path, passed = validate(root)
+            report = report_path.read_text(encoding="utf-8")
+
+            self.assertFalse(passed)
+            self.assertIn("UserService.refreshToken", report)
+            self.assertIn("fastapi", report.casefold())
+            self.assertIn("Symbol Checks", report)
+            self.assertIn("Dependency and Framework Checks", report)
+            self.assertIn("FAIL", report)
+
+    def test_plan_validator_accepts_indexed_symbols_and_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "src"
+            source.mkdir()
+            (source / "service.py").write_text(
+                "class UserService:\n    def refreshToken(self):\n        return True\n",
+                encoding="utf-8",
+            )
+            (root / "pyproject.toml").write_text(
+                "[project]\nname = 'demo'\ndependencies = ['fastapi>=0.100']\n",
+                encoding="utf-8",
+            )
+            plan_dir = root / ".codex" / "pro-plan"
+            plan_dir.mkdir(parents=True)
+            (plan_dir / "PLAN.md").write_text(
+                """# Plan
+
+## Summary
+Add a token refresh flow.
+
+## Assumptions and Constraints
+The existing service remains the integration point.
+
+## Architecture / Design
+Update `src/service.py` and use FastAPI.
+
+## Implementation Steps
+1. Extend `UserService.refreshToken()`.
+2. Keep the FastAPI integration.
+3. Add tests for the endpoint.
+
+## Testing and Validation
+Run the unit tests.
+
+## Risks and Open Questions
+Confirm the rollout sequence.
+""",
+                encoding="utf-8",
+            )
+
+            _, passed = validate(root)
+            self.assertTrue(passed)
+
     @patch("scripts.open_chat.webbrowser.open")
     @patch("scripts.open_chat.copy_to_clipboard", return_value="test-clipboard")
     def test_open_chat_keeps_handoff_manual(self, clipboard, browser) -> None:

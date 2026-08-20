@@ -14,7 +14,7 @@ The long-term goal is an AI development workflow with planning, execution, valid
 
 # v0.1 MVP - Planning Bridge
 
-Status: In development
+Status: Complete
 
 Goal:
 
@@ -51,6 +51,8 @@ Upgrade from a prompt generator into a planning validation system.
 ## Core Features
 
 ### 1. Plan Validator
+
+Status: Complete
 
 Validate ChatGPT Pro plans against repository facts.
 
