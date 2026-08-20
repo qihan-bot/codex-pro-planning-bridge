@@ -88,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_option(memory_show)
     memory_show.add_argument("--document", default=None, help="one document name, such as decisions.md")
 
+    memory_list = memory_subparsers.add_parser("list", help="list ADR entries and memory metadata")
+    _add_repo_option(memory_list)
+
     memory_write = memory_subparsers.add_parser("write", help="write or append a memory document")
     _add_repo_option(memory_write)
     memory_write.add_argument("--document", required=True)
@@ -97,6 +100,14 @@ def build_parser() -> argparse.ArgumentParser:
     memory_record = memory_subparsers.add_parser("record-plan", help="record a PLAN.md summary in decisions.md")
     _add_repo_option(memory_record)
     memory_record.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+
+    memory_adr = memory_subparsers.add_parser("adr-create", help="create a numbered architecture decision record")
+    _add_repo_option(memory_adr)
+    memory_adr.add_argument("--title", required=True)
+    memory_adr.add_argument("--status", default="Proposed")
+    content_group = memory_adr.add_mutually_exclusive_group()
+    content_group.add_argument("--content", default=None)
+    content_group.add_argument("--content-file", default=None)
 
     return parser
 
@@ -197,12 +208,31 @@ def _run(args: argparse.Namespace) -> int:
             else:
                 print(memory.to_markdown())
             return 0
+        if args.memory_command == "list":
+            metadata = memory.metadata()
+            print(f"Memory format version: {metadata.get('version', 'unknown')}")
+            print(f"ADR entries: {metadata.get('entries', len(memory.list_adrs()))}")
+            for entry in memory.list_adrs():
+                print(f"- {entry.key}: {entry.path.relative_to(memory.root).as_posix()}")
+            return 0
         if args.memory_command == "write":
             path = memory.write(args.document, args.content, append=args.append)
             print(f"Updated {path}")
             return 0
         if args.memory_command == "record-plan":
             print(f"Recorded {memory.record_plan(args.plan)}")
+            return 0
+        if args.memory_command == "adr-create":
+            memory.initialize()
+            content = args.content
+            if args.content_file:
+                content_path = resolve_repo_path(memory.root, args.content_file)
+                if not content_path.is_file():
+                    raise ValueError(f"ADR content file does not exist: {content_path}")
+                content = content_path.read_text(encoding="utf-8")
+            print(
+                f"Created {memory.create_adr(args.title, status=args.status, content=content)}"
+            )
             return 0
 
     raise AssertionError(f"unknown command: {args.command}")

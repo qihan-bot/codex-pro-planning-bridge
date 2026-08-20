@@ -79,6 +79,32 @@ Confirm the rollout.
                 (root / ".codex" / "project-memory" / "decisions.md").read_text(encoding="utf-8"),
             )
 
+    def test_memory_adr_commands_are_available_from_the_single_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+
+            self.assertEqual(
+                main(
+                    [
+                        "memory",
+                        "adr-create",
+                        "--repo",
+                        str(root),
+                        "--title",
+                        "Keep the workflow local",
+                        "--status",
+                        "Accepted",
+                        "--content",
+                        "No remote API calls.",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(main(["memory", "list", "--repo", str(root)]), 0)
+            adr = root / ".codex" / "project-memory" / "adr" / "0001-keep-the-workflow-local.md"
+            self.assertTrue(adr.is_file())
+            self.assertIn("No remote API calls.", adr.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

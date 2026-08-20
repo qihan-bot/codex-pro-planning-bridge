@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
@@ -40,6 +41,13 @@ class ProjectMemoryTests(unittest.TestCase):
             created = memory.initialize()
             self.assertEqual(len(created), 4)
             self.assertTrue((root / ".codex" / "project-memory" / "decisions.md").is_file())
+            metadata = json.loads(
+                (root / ".codex" / "project-memory" / "memory.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(metadata["version"], "1")
+            self.assertEqual(metadata["entries"], 0)
 
             memory.write("architecture.md", "# Architecture\n\nUse a local CLI.")
             self.assertEqual(memory.initialize(), [])
@@ -64,6 +72,37 @@ class ProjectMemoryTests(unittest.TestCase):
             self.assertIn("Planning record", content)
             self.assertIn("Implement a service change.", content)
             self.assertIn("The service remains the integration point.", content)
+
+    def test_adr_storage_is_numbered_versioned_and_listable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            memory = ProjectMemory(root)
+            memory.initialize()
+
+            first = memory.create_adr(
+                "Use a local cache",
+                status="Accepted",
+                content="The bridge must remain local-first.",
+            )
+            second = memory.create_adr("Keep the CLI stable")
+
+            self.assertEqual(first.name, "0001-use-a-local-cache.md")
+            self.assertEqual(second.name, "0002-keep-the-cli-stable.md")
+            self.assertEqual(
+                [item.key for item in memory.list_adrs()], ["ADR-0001", "ADR-0002"]
+            )
+            self.assertIn("Status: Accepted", first.read_text(encoding="utf-8"))
+            self.assertEqual(memory.metadata()["entries"], 2)
+
+    def test_legacy_decisions_document_remains_a_compatibility_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            memory = ProjectMemory(root)
+            memory.initialize()
+            memory.append("decisions", "- Existing decision remains documented.")
+
+            self.assertIn("Existing decision", memory.document("decisions").content)
+            self.assertEqual(memory.document("issues").key, "known-issues")
 
 
 if __name__ == "__main__":
