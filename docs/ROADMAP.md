@@ -159,31 +159,39 @@ Features:
 
 ---
 
-# v0.3 Autonomous Planning Assistance
+# v0.3 Continuous Planning Loop
+
+Status: In progress (`0.3.0.dev0`)
 
 Goal:
 
-Make Codex proactively recommend planning.
+Make the planning bridge recoverable and continuously aligned with the local
+repository while preserving the explicit ChatGPT Pro/Codex boundary.
 
 Features:
 
-- task complexity detection
-- automatic planning suggestions
-- architecture review loop
-- project memory retrieval
+- persisted workflow state and transition history
+- local Python, JavaScript/TypeScript, and Rust symbol indexing
+- context-aware plan validation and file/symbol drift reports
+- resumable context → validation → implementation → review loop
+- memory schema migrations and automatic planning-record updates
 
 Workflow:
 
 ```
-User request
+Task
  ↓
-Complexity analysis
+Context Collection
  ↓
-Recommend Pro Planning
+ChatGPT Pro Planning
  ↓
-Generate plan
+Plan Validation
  ↓
-Execute
+Codex Implementation
+ ↓
+Drift Detection
+ ↓
+Memory Update
 ```
 
 ---

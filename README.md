@@ -1,12 +1,16 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.2.1 Architecture Hardening** (`0.2.1`).
+Release status: **v0.3 Planning Loop development** (`0.3.0.dev0`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
 The bridge has no OpenAI API integration, does not require an API key, and never submits a prompt automatically.
 
-v0.2.1 stabilizes the foundation for the v0.3 Planning Loop: shared typed models, layered context collection, machine-readable context, ADR-based memory, rename-aware drift checks, and local quality gates.
+v0.3 turns those components into a recoverable planning loop. Workflow state
+and transition history are persisted locally, repository symbols are indexed
+with standard-library tooling, and the bridge pauses at the explicit Codex
+implementation boundary. It still has no OpenAI API integration, browser
+scraping, API key configuration, or autonomous source-code modification.
 
 ## Complete planning loop
 
@@ -74,8 +78,16 @@ cpb diff --repo . --plan .codex/pro-plan/PLAN.md --base HEAD~1
 cpb memory init --repo .
 cpb memory list --repo .
 cpb memory show --repo .
+cpb memory migrate --repo .
 cpb memory record-plan --repo .
 cpb memory adr-create --repo . --title "Keep the workflow local"
+
+# Advance the recoverable v0.3 workflow. Repeat after each human/Codex step.
+cpb loop --repo . --goal "Add the requested feature"
+# After ChatGPT Pro returns a reviewed PLAN.md:
+cpb loop --repo .
+# After Codex implements the approved plan:
+cpb loop --repo . --review --base HEAD
 ```
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
@@ -91,6 +103,8 @@ The persistent memory documents live in `.codex/project-memory/`. Existing v0.2 
 ├── constraints.md
 ├── known-issues.md
 ├── memory.json
+├── migrations/
+│   └── 0002-add-versioned-migrations.md
 └── adr/
     ├── 0001-database.md
     └── 0002-api-design.md
@@ -98,7 +112,32 @@ The persistent memory documents live in `.codex/project-memory/`. Existing v0.2 
 
 They are ordinary Markdown and JSON files. `memory init` is idempotent, `memory list` shows versioned metadata and ADRs, `memory adr-create` creates the next ADR, and `memory record-plan` stores the Summary and Architecture sections of a local `PLAN.md` as an accepted ADR while keeping a compatibility link in `decisions.md`.
 
-The generated `.codex/pro-plan/context.json` is the machine-readable counterpart to the human-facing Markdown context. It contains detected project types, bounded file metadata, dependencies, Git state, and redaction notes.
+The generated `.codex/pro-plan/context.json` is the machine-readable counterpart to the human-facing Markdown context. It contains detected project types, bounded file metadata, dependencies, Git state, and redaction notes. `cpb loop` also creates a local `symbol-index.json` baseline for symbol-level drift review.
+
+## v0.3 recoverable planning loop
+
+`cpb loop` advances one local session through explicit states:
+
+```text
+NEW_TASK → CONTEXT_READY → PLAN_READY → VALIDATING
+                                      ↓
+                              IMPLEMENTING
+                                      ↓
+                              REVIEWING → COMPLETED
+```
+
+The current state is `.codex/workflow/state.json` and every transition is
+recorded in `.codex/workflow/history.json`. If the process stops, run the same
+command again to resume. When `PLAN.md` is absent, the loop stops after
+generating `REQUEST.md`; it never assumes that ChatGPT Pro was contacted. When
+validation passes, it stops at `IMPLEMENTING` and waits for explicit Codex
+execution. `--review` then generates `PLAN_DIFF.md`, reports file and symbol
+changes, and records the plan in Project Memory.
+
+The local repository intelligence layer is in
+`src/codex_pro_planning_bridge/intelligence/symbol_index.py`. It supports
+Python AST extraction and conservative JavaScript/TypeScript and Rust symbol
+extraction without executing project code or contacting a service.
 
 ## Compatibility scripts
 
@@ -113,9 +152,9 @@ python scripts/plan_diff.py --base HEAD~1
 python scripts/memory.py init
 ```
 
-The generated `.codex/pro-plan/` directory contains `repo-tree.txt`, `git-status.txt`, `project-context.md`, `context.json`, `REQUEST.md`, `VALIDATION_REPORT.md`, and `PLAN_DIFF.md`. Planning artifacts are ignored by Git; `.codex/project-memory/` remains versionable project documentation.
+The generated `.codex/pro-plan/` directory contains `repo-tree.txt`, `git-status.txt`, `project-context.md`, `context.json`, `symbol-index.json`, `REQUEST.md`, `VALIDATION_REPORT.md`, and `PLAN_DIFF.md`. Planning artifacts are ignored by Git; `.codex/project-memory/` and `.codex/workflow/` remain ordinary local, reviewable project records.
 
-## Architecture hardening
+## Architecture and workflow layers
 
 Context collection is split into focused layers:
 
@@ -129,6 +168,17 @@ src/codex_pro_planning_bridge/context/
 ```
 
 Shared dataclasses in `src/codex_pro_planning_bridge/models.py` form the boundary between context, planning, validation, memory, and drift reporting. Plan Diff detects Git renames, and Validator includes possible local symbol matches when a plan references an unavailable API.
+
+The v0.3 workflow layers are:
+
+```text
+src/codex_pro_planning_bridge/
+├── state.py       # versioned state.json/history.json persistence
+├── workflow.py    # explicit transition rules
+├── loop.py        # context → validation → review orchestration
+└── intelligence/
+    └── symbol_index.py  # local Python/JS/TS/Rust symbols and imports
+```
 
 ## Plan Validator and Repository Fact Checker
 
@@ -174,7 +224,7 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] Unified CLI and compatibility wrappers
 - [x] v0.2.0-beta: planning validation baseline
 - [x] v0.2.1 Architecture Hardening
-- [ ] v0.3 Planning Loop
+- [ ] v0.3 Planning Loop (development in progress)
 
 ## License
 
