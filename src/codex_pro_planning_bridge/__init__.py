@@ -1,4 +1,4 @@
 """Local-first planning bridge for Codex and ChatGPT Pro."""
 
 __all__ = ["__version__"]
-__version__ = "0.3.1.dev0"
+__version__ = "0.3.2"

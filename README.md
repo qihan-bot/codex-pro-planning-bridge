@@ -1,18 +1,20 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.3.1 Planning Safety Layer development** (`0.3.1.dev0`).
+Release status: **v0.3.2 Hardening** (`0.3.2`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
 The bridge has no OpenAI API integration, does not require an API key, and never submits a prompt automatically.
 
-v0.3 turns those components into a recoverable planning loop. v0.3.1 adds an
-append-only event audit log, a human approval gate before implementation,
-workflow recovery commands, and a local symbol relationship graph. Workflow
-state and transition history remain persisted locally, and the bridge pauses at
-the explicit Codex implementation boundary. It still has no OpenAI API
-integration, browser scraping, API key configuration, or autonomous source-code
-modification.
+v0.3 turns those components into a recoverable planning loop. The published
+`v0.3.1-beta` safety layer adds an append-only event audit log, a human approval
+gate before implementation, workflow recovery commands, and a local symbol
+relationship graph. v0.3.2 hardens that boundary with approval hash binding,
+read-only event queries, auditable workflow rollback, and broader graph tests.
+Workflow state and transition history remain persisted locally, and the bridge
+pauses at the explicit Codex implementation boundary. It still has no OpenAI
+API integration, browser scraping, API key configuration, or autonomous
+source-code modification.
 
 ## Complete planning loop
 
@@ -100,6 +102,14 @@ cpb resume --repo .
 cpb pause --repo .
 cpb cancel --repo .
 cpb history --repo .
+
+# Query the append-only audit log without changing workflow state.
+cpb events --repo .
+cpb events --repo . --event WORKFLOW_ROLLBACK --format json
+cpb events --repo . --actor user --limit 20
+
+# Restore workflow metadata to an earlier event; source files are untouched.
+cpb rollback --repo . --to 3 --reason "retry validation"
 ```
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
@@ -147,6 +157,16 @@ generating `REQUEST.md`; it never assumes that ChatGPT Pro was contacted. When
 validation passes, it requires a matching `.codex/pro-plan/APPROVAL.json`
 before entering `IMPLEMENTING`. `--review` then generates `PLAN_DIFF.md`,
 reports file and symbol changes, and records the plan in Project Memory.
+
+The approval record must include the exact repository-relative plan path and
+SHA-256 hash of the current `PLAN.md`; editing the plan invalidates the
+approval. `cpb events` queries the existing `.codex/workflow/events.jsonl`
+without initializing or rewriting state. It supports `--event`, `--actor`,
+`--from-state`, `--to-state`, `--since`, `--until`, `--limit`, and
+`--format json`; results include stable one-based indexes. `cpb rollback --to N`
+restores only workflow metadata to event `N` and appends a
+`WORKFLOW_ROLLBACK` event, preserving all earlier audit records and repository
+files.
 
 The local repository intelligence layer is in
 `src/codex_pro_planning_bridge/intelligence/symbol_index.py` and
@@ -242,7 +262,8 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] v0.2.0-beta: planning validation baseline
 - [x] v0.2.1 Architecture Hardening
 - [x] v0.3 Planning Loop
-- [ ] v0.3.1 Planning Safety Layer (development in progress)
+- [x] v0.3.1 Planning Safety Layer (`v0.3.1-beta`)
+- [x] v0.3.2 Hardening (`v0.3.2`)
 
 ## License
 

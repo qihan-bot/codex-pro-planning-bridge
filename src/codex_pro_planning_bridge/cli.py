@@ -154,6 +154,37 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_option(history_parser)
     history_parser.add_argument("--format", choices=("text", "json"), default="text")
 
+    events_parser = subparsers.add_parser(
+        "events",
+        aliases=["event"],
+        help="query the append-only workflow event log without changing state",
+    )
+    _add_repo_option(events_parser)
+    events_parser.add_argument("--event", default=None, help="exact event name filter")
+    events_parser.add_argument("--actor", default=None, help="exact actor filter")
+    events_parser.add_argument("--from-state", dest="from_state", default=None)
+    events_parser.add_argument("--to-state", dest="to_state", default=None)
+    events_parser.add_argument("--since", default=None, help="ISO-8601 lower timestamp bound")
+    events_parser.add_argument("--until", default=None, help="ISO-8601 upper timestamp bound")
+    events_parser.add_argument("--limit", type=int, default=None)
+    events_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    rollback_parser = subparsers.add_parser(
+        "rollback",
+        help="restore workflow metadata to an earlier event target state",
+    )
+    _add_repo_option(rollback_parser)
+    rollback_parser.add_argument(
+        "--to",
+        "--to-event",
+        dest="event_index",
+        required=True,
+        type=int,
+        help="one-based event index shown by cpb events",
+    )
+    rollback_parser.add_argument("--reason", default="workflow rollback requested")
+    rollback_parser.add_argument("--format", choices=("text", "json"), default="text")
+
     memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
 
@@ -233,6 +264,26 @@ def _print_loop_result(loop_result, output_format: str) -> None:
     print(f"Next action: {loop_result.next_action}")
     for name, path in loop_result.artifacts.items():
         print(f"- {name}: {path}")
+
+
+def _print_event_records(records, output_format: str) -> None:
+    if output_format == "json":
+        print(
+            json.dumps(
+                {"count": len(records), "events": [item.to_dict() for item in records]},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+    print(f"Events: {len(records)}")
+    for record in records:
+        event = record.event
+        print(
+            f"#{record.index} {event.timestamp.isoformat()} {event.event} "
+            f"{event.from_state.value if event.from_state else '(none)'} -> "
+            f"{event.to_state.value} [{event.actor}] {event.reason}"
+        )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -364,6 +415,37 @@ def _run(args: argparse.Namespace) -> int:
                     f"{item['from'] or '(none)'} -> {item['to']} "
                     f"[{item['actor']}]"
                 )
+        return 0
+
+    if args.command in {"events", "event"}:
+        store = WorkflowStateStore(args.repo)
+        records = store.query_events(
+            event=args.event,
+            actor=args.actor,
+            from_state=args.from_state,
+            to_state=args.to_state,
+            since=args.since,
+            until=args.until,
+            limit=args.limit,
+        )
+        _print_event_records(records, args.format)
+        return 0
+
+    if args.command == "rollback":
+        snapshot = Workflow(args.repo).rollback(args.event_index, args.reason)
+        payload = {
+            "state": snapshot.state.value,
+            "event_index": args.event_index,
+            "next_action": snapshot.next_action,
+        }
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"Workflow rolled back to event #{args.event_index}: "
+                f"{snapshot.state.value}"
+            )
+            print(f"Next action: {snapshot.next_action}")
         return 0
 
     if args.command == "pause":

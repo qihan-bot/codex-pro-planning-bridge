@@ -7,13 +7,15 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from .repository import resolve_repo, resolve_repo_path, write_text
 
 
 APPROVAL_FILE = Path(".codex/pro-plan/APPROVAL.json")
-APPROVAL_SCHEMA_VERSION = 1
+APPROVAL_SCHEMA_VERSION = 2
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _now() -> datetime:
@@ -96,7 +98,7 @@ class PlanApprovalStore:
             plan=(str(raw["plan"]) if raw.get("plan") else None),
             plan_sha256=(str(raw["plan_sha256"]) if raw.get("plan_sha256") else None),
             reason=(str(raw["reason"]) if raw.get("reason") else None),
-            schema_version=APPROVAL_SCHEMA_VERSION,
+            schema_version=schema_version,
         )
 
     def _relative_plan(self) -> str:
@@ -105,19 +107,45 @@ class PlanApprovalStore:
         except ValueError:
             return str(self.plan_path)
 
+    def binding_status(self) -> dict[str, object]:
+        """Explain whether the approval is bound to the current plan contents.
+
+        A valid approval must carry both the canonical plan path and a complete
+        SHA-256 digest.  This deliberately rejects hand-written or legacy
+        approval artifacts that only say ``approved: true``.
+        """
+
+        approval = self.load()
+        if approval.schema_version < 1:
+            return {"effective": False, "reason": "approval schema version is missing"}
+        if not approval.approved:
+            return {"effective": False, "reason": "approval artifact is not approved"}
+        if not approval.approved_by or not approval.approved_by.strip():
+            return {"effective": False, "reason": "approved_by is missing"}
+        if approval.timestamp is None:
+            return {"effective": False, "reason": "approval timestamp is missing or invalid"}
+        if not approval.plan:
+            return {"effective": False, "reason": "approved plan path is missing"}
+        if approval.plan != self._relative_plan():
+            return {"effective": False, "reason": "approved plan path does not match current plan"}
+        if not approval.plan_sha256:
+            return {"effective": False, "reason": "approved plan hash is missing"}
+        if not _SHA256_RE.fullmatch(approval.plan_sha256):
+            return {"effective": False, "reason": "approved plan hash is malformed"}
+        if not self.plan_path.is_file():
+            return {"effective": False, "reason": "PLAN.md does not exist"}
+        current_digest = plan_digest(self.plan_path)
+        if approval.plan_sha256.casefold() != current_digest.casefold():
+            return {"effective": False, "reason": "PLAN.md contents differ from approved hash"}
+        return {
+            "effective": True,
+            "reason": "approval matches the current PLAN.md path and SHA-256 hash",
+        }
+
     def is_approved(self) -> bool:
         """Return true only for an approval matching the current PLAN.md."""
 
-        approval = self.load()
-        if not approval.approved or not approval.approved_by or approval.timestamp is None:
-            return False
-        if not self.plan_path.is_file():
-            return False
-        if approval.plan and approval.plan != self._relative_plan():
-            return False
-        if approval.plan_sha256 and approval.plan_sha256 != plan_digest(self.plan_path):
-            return False
-        return True
+        return bool(self.binding_status()["effective"])
 
     def approve(self, approved_by: str = "user") -> Path:
         """Write an approval bound to the current PLAN.md contents."""
@@ -157,9 +185,11 @@ class PlanApprovalStore:
 
     def status(self) -> dict[str, Any]:
         approval = self.load()
+        binding = self.binding_status()
         return {
             **approval.to_dict(),
-            "effective": self.is_approved(),
+            "effective": binding["effective"],
+            "binding_reason": binding["reason"],
             "approval_path": str(self.path),
             "plan_path": str(self.plan_path),
         }
