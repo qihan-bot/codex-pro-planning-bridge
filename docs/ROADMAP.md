@@ -161,7 +161,7 @@ Features:
 
 # v0.3 Continuous Planning Loop
 
-Status: In progress (`0.3.0.dev0`)
+Status: Complete (`0.3.0.dev0`)
 
 Goal:
 
@@ -193,6 +193,23 @@ Drift Detection
  ↓
 Memory Update
 ```
+
+---
+
+# v0.3.1 Planning Safety Layer
+
+Status: In progress (`0.3.1.dev0`)
+
+Features:
+
+- append-only workflow event audit log
+- explicit human approval records for `PLAN.md`
+- `cpb status`, `resume`, `pause`, `cancel`, and `history`
+- local symbol ownership, import, and call relationship graph
+- recovery and approval-flow tests
+
+Constraints remain local-first: no OpenAI API calls, API keys, browser
+automation, autonomous source modification, or bypassing human approval.
 
 ---
 

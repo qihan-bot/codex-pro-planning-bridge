@@ -7,6 +7,7 @@ import unittest
 
 from codex_pro_planning_bridge.loop import run_loop
 from codex_pro_planning_bridge.models import WorkflowState
+from codex_pro_planning_bridge.approval import PlanApprovalStore
 
 
 PLAN = """# Plan
@@ -65,6 +66,7 @@ class PlanningLoopIntegrationTests(unittest.TestCase):
 
             plan_path = root / ".codex" / "pro-plan" / "PLAN.md"
             plan_path.write_text(PLAN, encoding="utf-8")
+            PlanApprovalStore(root, plan=plan_path).approve("test-user")
             ready = run_loop(root, goal="Improve the demo")
             self.assertEqual(ready.state, WorkflowState.IMPLEMENTING)
             self.assertTrue(ready.validation and ready.validation.passed)

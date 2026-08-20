@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from . import __version__
+from .approval import PlanApprovalStore
 from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
 from .diff import diff_plan, render_plan_diff
@@ -14,7 +16,9 @@ from .handoff import open_chat
 from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
+from .state import WorkflowStateStore
 from .validator import validate as validate_repository
+from .workflow import Workflow
 
 
 def _add_collection_options(parser: argparse.ArgumentParser) -> None:
@@ -105,6 +109,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     loop_parser.add_argument("--format", choices=("text", "json"), default="text")
 
+    approve_parser = subparsers.add_parser(
+        "approve",
+        help="record or revoke explicit human approval for PLAN.md",
+    )
+    _add_repo_option(approve_parser)
+    approve_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    approve_parser.add_argument("--approved-by", default="user")
+    approve_parser.add_argument("--revoke", action="store_true")
+    approve_parser.add_argument("--reason", default="plan approval revoked")
+    approve_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="inspect the current workflow state without advancing it",
+    )
+    _add_repo_option(status_parser)
+    status_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    status_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="resume a paused or interrupted workflow",
+    )
+    _add_repo_option(resume_parser)
+    resume_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
+    resume_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    resume_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
+    resume_parser.add_argument("--review", action="store_true")
+    resume_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    pause_parser = subparsers.add_parser("pause", help="pause the current workflow")
+    _add_repo_option(pause_parser)
+    pause_parser.add_argument("--reason", default="workflow paused by user")
+
+    cancel_parser = subparsers.add_parser("cancel", help="cancel the current workflow")
+    _add_repo_option(cancel_parser)
+    cancel_parser.add_argument("--reason", default="workflow cancelled by user")
+
+    history_parser = subparsers.add_parser(
+        "history",
+        help="show transition history and the append-only event log",
+    )
+    _add_repo_option(history_parser)
+    history_parser.add_argument("--format", choices=("text", "json"), default="text")
+
     memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
 
@@ -154,6 +203,36 @@ def _collect_context_args(args: argparse.Namespace):
         max_total_bytes=args.max_total_bytes,
         include_hidden=args.include_hidden,
     )
+
+
+def _workflow_status(repo: str, plan: str) -> dict[str, Any]:
+    root = resolve_repo(repo)
+    store = WorkflowStateStore(root)
+    snapshot = store.load(default_plan=plan)
+    approval = PlanApprovalStore(root, plan=snapshot.plan or plan)
+    return {
+        "state": snapshot.state.value,
+        "goal": snapshot.goal,
+        "plan": str(snapshot.plan) if snapshot.plan else None,
+        "started": snapshot.started.isoformat(),
+        "updated": snapshot.updated.isoformat(),
+        "next_action": snapshot.next_action,
+        "error": snapshot.error,
+        "paused_from": snapshot.paused_from.value if snapshot.paused_from else None,
+        "approval": approval.status(),
+    }
+
+
+def _print_loop_result(loop_result, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(loop_result.to_dict(), indent=2, ensure_ascii=False))
+        return
+    print(f"Workflow state: {loop_result.state.value}")
+    for message in loop_result.messages:
+        print(f"- {message}")
+    print(f"Next action: {loop_result.next_action}")
+    for name, path in loop_result.artifacts.items():
+        print(f"- {name}: {path}")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -236,6 +315,79 @@ def _run(args: argparse.Namespace) -> int:
             print(f"Wrote {report_path}")
         return 0 if result.ok else 1
 
+    if args.command == "approve":
+        approval = PlanApprovalStore(args.repo, plan=args.plan)
+        path = approval.revoke(args.reason) if args.revoke else approval.approve(args.approved_by)
+        payload = approval.status()
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            action = "revoked" if args.revoke else "recorded"
+            print(f"Plan approval {action}: {path}")
+            print(f"Effective approval: {payload['effective']}")
+        return 0
+
+    if args.command == "status":
+        payload = _workflow_status(args.repo, args.plan)
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Workflow state: {payload['state']}")
+            print(f"Goal: {payload['goal'] or '(none)'}")
+            print(f"Plan: {payload['plan'] or '(none)'}")
+            print(f"Approval effective: {payload['approval']['effective']}")
+            if payload["next_action"]:
+                print(f"Next action: {payload['next_action']}")
+            if payload["error"]:
+                print(f"Error: {payload['error']}")
+        return 0
+
+    if args.command == "history":
+        store = WorkflowStateStore(args.repo)
+        payload = {
+            "transitions": [item.to_dict() for item in store.history()],
+            "events": [item.to_dict() for item in store.events()],
+        }
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("Transition history:")
+            for item in payload["transitions"]:
+                print(
+                    f"- {item['at']}: {item['from'] or '(none)'} -> {item['to']} "
+                    f"({item['reason']})"
+                )
+            print("Event log:")
+            for item in payload["events"]:
+                print(
+                    f"- {item['timestamp']}: {item['event']} "
+                    f"{item['from'] or '(none)'} -> {item['to']} "
+                    f"[{item['actor']}]"
+                )
+        return 0
+
+    if args.command == "pause":
+        snapshot = Workflow(args.repo).pause(args.reason)
+        print(f"Workflow paused from {snapshot.paused_from.value if snapshot.paused_from else 'unknown'}.")
+        return 0
+
+    if args.command == "cancel":
+        snapshot = Workflow(args.repo).cancel(args.reason)
+        print(f"Workflow cancelled in state {snapshot.state.value}.")
+        return 0
+
+    if args.command == "resume":
+        loop_result = run_loop(
+            args.repo,
+            goal=args.user_request,
+            plan=args.plan,
+            base=args.base,
+            review=args.review,
+            resume=True,
+        )
+        _print_loop_result(loop_result, args.format)
+        return 0 if loop_result.ok else 1
+
     if args.command == "loop":
         loop_result = run_loop(
             args.repo,
@@ -245,15 +397,7 @@ def _run(args: argparse.Namespace) -> int:
             review=args.review,
             reset=args.reset,
         )
-        if args.format == "json":
-            print(json.dumps(loop_result.to_dict(), indent=2, ensure_ascii=False))
-        else:
-            print(f"Workflow state: {loop_result.state.value}")
-            for message in loop_result.messages:
-                print(f"- {message}")
-            print(f"Next action: {loop_result.next_action}")
-            for name, path in loop_result.artifacts.items():
-                print(f"- {name}: {path}")
+        _print_loop_result(loop_result, args.format)
         return 0 if loop_result.ok else 1
 
     if args.command == "memory":

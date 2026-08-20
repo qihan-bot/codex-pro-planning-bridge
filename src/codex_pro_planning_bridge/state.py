@@ -20,7 +20,9 @@ from .repository import resolve_repo, resolve_repo_path, write_text
 WORKFLOW_DIRECTORY = Path(".codex/workflow")
 STATE_FILE = WORKFLOW_DIRECTORY / "state.json"
 HISTORY_FILE = WORKFLOW_DIRECTORY / "history.json"
+EVENTS_FILE = WORKFLOW_DIRECTORY / "events.jsonl"
 WORKFLOW_SCHEMA_VERSION = 1
+EVENT_SCHEMA_VERSION = 1
 
 
 def _now() -> datetime:
@@ -60,6 +62,7 @@ class WorkflowSnapshot:
     updated: datetime = field(default_factory=_now)
     next_action: str | None = None
     error: str | None = None
+    paused_from: WorkflowState | None = None
 
 
 @dataclass(frozen=True)
@@ -70,12 +73,48 @@ class WorkflowTransition:
     to_state: WorkflowState
     at: datetime
     reason: str
+    event: str = "STATE_TRANSITION"
+    actor: str = "codex"
 
     def to_dict(self) -> dict[str, str | None]:
         return {
             "from": self.from_state.value if self.from_state else None,
             "to": self.to_state.value,
             "at": self.at.isoformat(),
+            "reason": self.reason,
+        }
+
+    def to_event(self) -> "WorkflowEvent":
+        return WorkflowEvent(
+            timestamp=self.at,
+            event=self.event,
+            from_state=self.from_state,
+            to_state=self.to_state,
+            actor=self.actor,
+            reason=self.reason,
+        )
+
+
+@dataclass(frozen=True)
+class WorkflowEvent:
+    """One append-only JSONL record for workflow auditing."""
+
+    timestamp: datetime
+    event: str
+    from_state: WorkflowState | None
+    to_state: WorkflowState
+    actor: str = "codex"
+    reason: str = ""
+    schema_version: int = EVENT_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "timestamp": self.timestamp.isoformat(),
+            "event": self.event,
+            "from": self.from_state.value if self.from_state else None,
+            "to": self.to_state.value,
+            "actor": self.actor,
             "reason": self.reason,
         }
 
@@ -92,6 +131,11 @@ def _snapshot_from_dict(root: Path, value: dict[str, Any]) -> WorkflowSnapshot:
         updated=_parse_datetime(value.get("updated"), started),
         next_action=(str(value["next_action"]) if value.get("next_action") else None),
         error=(str(value["error"]) if value.get("error") else None),
+        paused_from=(
+            _state_value(value["paused_from"])
+            if value.get("paused_from")
+            else None
+        ),
     )
 
 
@@ -103,6 +147,7 @@ class WorkflowStateStore:
         self.directory = self.root / WORKFLOW_DIRECTORY
         self.state_path = self.root / STATE_FILE
         self.history_path = self.root / HISTORY_FILE
+        self.events_path = self.root / EVENTS_FILE
 
     def _relative_or_absolute(self, path: Path | None) -> str | None:
         if path is None:
@@ -130,6 +175,7 @@ class WorkflowStateStore:
             "updated": snapshot.updated.isoformat(),
             "next_action": snapshot.next_action,
             "error": snapshot.error,
+            "paused_from": snapshot.paused_from.value if snapshot.paused_from else None,
         }
 
     def save(self, snapshot: WorkflowSnapshot) -> Path:
@@ -189,6 +235,7 @@ class WorkflowStateStore:
                 to_state=snapshot.state,
                 at=snapshot.updated,
                 reason="workflow initialized",
+                event="WORKFLOW_INITIALIZED",
             )
         )
         return snapshot
@@ -236,11 +283,11 @@ class WorkflowStateStore:
         return result
 
     def record(self, transition: WorkflowTransition) -> Path:
-        """Append one transition without replacing previous history."""
+        """Append one transition to both the readable history and JSONL audit log."""
 
         events = [item.to_dict() for item in self.history()]
         events.append(transition.to_dict())
-        return write_text(
+        history_path = write_text(
             self.history_path,
             json.dumps(
                 {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
@@ -248,6 +295,51 @@ class WorkflowStateStore:
                 ensure_ascii=False,
             ),
         )
+        self._append_event(transition.to_event())
+        return history_path
+
+    def _append_event(self, event: WorkflowEvent) -> Path:
+        """Append exactly one event line without rewriting prior audit records."""
+
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.events_path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
+        return self.events_path
+
+    def events(self) -> list[WorkflowEvent]:
+        """Read the append-only event log, ignoring malformed lines safely."""
+
+        if not self.events_path.is_file():
+            return []
+        result: list[WorkflowEvent] = []
+        for line in self.events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    continue
+                schema_version = int(value.get("schema_version", 0))
+                if schema_version > EVENT_SCHEMA_VERSION:
+                    raise ValueError(
+                        f"workflow event schema {schema_version} is newer than supported "
+                        f"schema {EVENT_SCHEMA_VERSION}"
+                    )
+                from_value = value.get("from")
+                result.append(
+                    WorkflowEvent(
+                        timestamp=_parse_datetime(value.get("timestamp")),
+                        event=str(value.get("event", "STATE_TRANSITION")),
+                        from_state=_state_value(from_value) if from_value else None,
+                        to_state=_state_value(value.get("to")),
+                        actor=str(value.get("actor", "codex")),
+                        reason=str(value.get("reason", "")),
+                        schema_version=EVENT_SCHEMA_VERSION,
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return result
 
     def reset(
         self,
@@ -271,9 +363,10 @@ class WorkflowStateStore:
         self.record(
             WorkflowTransition(
                 from_state=previous.state,
-                to_state=WorkflowState.NEW_TASK,
-                at=now,
-                reason=reason,
-            )
+            to_state=WorkflowState.NEW_TASK,
+            at=now,
+            reason=reason,
+            event="WORKFLOW_RESET",
+        )
         )
         return snapshot

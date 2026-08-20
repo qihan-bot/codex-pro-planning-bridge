@@ -1,16 +1,18 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.3 Planning Loop development** (`0.3.0.dev0`).
+Release status: **v0.3.1 Planning Safety Layer development** (`0.3.1.dev0`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
 The bridge has no OpenAI API integration, does not require an API key, and never submits a prompt automatically.
 
-v0.3 turns those components into a recoverable planning loop. Workflow state
-and transition history are persisted locally, repository symbols are indexed
-with standard-library tooling, and the bridge pauses at the explicit Codex
-implementation boundary. It still has no OpenAI API integration, browser
-scraping, API key configuration, or autonomous source-code modification.
+v0.3 turns those components into a recoverable planning loop. v0.3.1 adds an
+append-only event audit log, a human approval gate before implementation,
+workflow recovery commands, and a local symbol relationship graph. Workflow
+state and transition history remain persisted locally, and the bridge pauses at
+the explicit Codex implementation boundary. It still has no OpenAI API
+integration, browser scraping, API key configuration, or autonomous source-code
+modification.
 
 ## Complete planning loop
 
@@ -71,6 +73,9 @@ cpb open --repo . --no-pause
 # After manually saving the Pro response as PLAN.md, validate it locally.
 cpb validate --repo . --plan .codex/pro-plan/PLAN.md
 
+# Record explicit human approval before implementation can begin.
+cpb approve --repo . --plan .codex/pro-plan/PLAN.md --approved-by user
+
 # Compare the plan with changes made after a known baseline.
 cpb diff --repo . --plan .codex/pro-plan/PLAN.md --base HEAD~1
 
@@ -88,6 +93,13 @@ cpb loop --repo . --goal "Add the requested feature"
 cpb loop --repo .
 # After Codex implements the approved plan:
 cpb loop --repo . --review --base HEAD
+
+# Inspect or recover a workflow without advancing it implicitly.
+cpb status --repo .
+cpb resume --repo .
+cpb pause --repo .
+cpb cancel --repo .
+cpb history --repo .
 ```
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
@@ -112,7 +124,7 @@ The persistent memory documents live in `.codex/project-memory/`. Existing v0.2 
 
 They are ordinary Markdown and JSON files. `memory init` is idempotent, `memory list` shows versioned metadata and ADRs, `memory adr-create` creates the next ADR, and `memory record-plan` stores the Summary and Architecture sections of a local `PLAN.md` as an accepted ADR while keeping a compatibility link in `decisions.md`.
 
-The generated `.codex/pro-plan/context.json` is the machine-readable counterpart to the human-facing Markdown context. It contains detected project types, bounded file metadata, dependencies, Git state, and redaction notes. `cpb loop` also creates a local `symbol-index.json` baseline for symbol-level drift review.
+The generated `.codex/pro-plan/context.json` is the machine-readable counterpart to the human-facing Markdown context. It contains detected project types, bounded file metadata, dependencies, Git state, and redaction notes. `cpb loop` also creates local `symbol-index.json` and `symbol-graph.json` baselines for symbol-level drift review.
 
 ## v0.3 recoverable planning loop
 
@@ -120,24 +132,27 @@ The generated `.codex/pro-plan/context.json` is the machine-readable counterpart
 
 ```text
 NEW_TASK → CONTEXT_READY → PLAN_READY → VALIDATING
-                                      ↓
+                                      ↓ approval
                               IMPLEMENTING
                                       ↓
                               REVIEWING → COMPLETED
+                    active state ↔ PAUSED → CANCELLED
 ```
 
 The current state is `.codex/workflow/state.json` and every transition is
-recorded in `.codex/workflow/history.json`. If the process stops, run the same
-command again to resume. When `PLAN.md` is absent, the loop stops after
+recorded in `.codex/workflow/history.json`. The append-only audit trail is
+`.codex/workflow/events.jsonl`. If the process stops, run `cpb resume` or the
+same loop command again. When `PLAN.md` is absent, the loop stops after
 generating `REQUEST.md`; it never assumes that ChatGPT Pro was contacted. When
-validation passes, it stops at `IMPLEMENTING` and waits for explicit Codex
-execution. `--review` then generates `PLAN_DIFF.md`, reports file and symbol
-changes, and records the plan in Project Memory.
+validation passes, it requires a matching `.codex/pro-plan/APPROVAL.json`
+before entering `IMPLEMENTING`. `--review` then generates `PLAN_DIFF.md`,
+reports file and symbol changes, and records the plan in Project Memory.
 
 The local repository intelligence layer is in
-`src/codex_pro_planning_bridge/intelligence/symbol_index.py`. It supports
-Python AST extraction and conservative JavaScript/TypeScript and Rust symbol
-extraction without executing project code or contacting a service.
+`src/codex_pro_planning_bridge/intelligence/symbol_index.py` and
+`symbol_graph.py`. They support Python AST extraction and conservative
+JavaScript/TypeScript and Rust symbol and relationship extraction without
+executing project code or contacting a service.
 
 ## Compatibility scripts
 
@@ -152,7 +167,7 @@ python scripts/plan_diff.py --base HEAD~1
 python scripts/memory.py init
 ```
 
-The generated `.codex/pro-plan/` directory contains `repo-tree.txt`, `git-status.txt`, `project-context.md`, `context.json`, `symbol-index.json`, `REQUEST.md`, `VALIDATION_REPORT.md`, and `PLAN_DIFF.md`. Planning artifacts are ignored by Git; `.codex/project-memory/` and `.codex/workflow/` remain ordinary local, reviewable project records.
+The generated `.codex/pro-plan/` directory contains `repo-tree.txt`, `git-status.txt`, `project-context.md`, `context.json`, `symbol-index.json`, `symbol-graph.json`, `REQUEST.md`, `PLAN.md`, `APPROVAL.json`, `VALIDATION_REPORT.md`, and `PLAN_DIFF.md`. Planning artifacts are ignored by Git; `.codex/project-memory/` and `.codex/workflow/` remain ordinary local, reviewable project records.
 
 ## Architecture and workflow layers
 
@@ -173,11 +188,13 @@ The v0.3 workflow layers are:
 
 ```text
 src/codex_pro_planning_bridge/
-├── state.py       # versioned state.json/history.json persistence
+├── approval.py    # explicit PLAN.md approval records
+├── state.py       # versioned state/history/event persistence
 ├── workflow.py    # explicit transition rules
 ├── loop.py        # context → validation → review orchestration
 └── intelligence/
-    └── symbol_index.py  # local Python/JS/TS/Rust symbols and imports
+    ├── symbol_index.py  # local Python/JS/TS/Rust symbols and imports
+    └── symbol_graph.py  # local ownership/import/call relationships
 ```
 
 ## Plan Validator and Repository Fact Checker
@@ -199,7 +216,7 @@ Findings are grouped as `ERROR`, `WARN`, or `OK`. The fact checker never execute
 - Secret-looking files such as `.env`, credentials, private-key files, and secret directories are excluded from scans and excerpts.
 - File and excerpt limits prevent unexpectedly large prompts.
 - The bridge may open the ChatGPT website and copy a request locally, but it never calls an API or submits content automatically.
-- `REQUEST.md`, `PLAN.md`, validation reports, and diff reports should be reviewed as project-local artifacts.
+- `REQUEST.md`, `PLAN.md`, `APPROVAL.json`, validation reports, diff reports, and event logs should be reviewed as project-local artifacts.
 
 ## Codex skill
 
@@ -224,7 +241,8 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] Unified CLI and compatibility wrappers
 - [x] v0.2.0-beta: planning validation baseline
 - [x] v0.2.1 Architecture Hardening
-- [ ] v0.3 Planning Loop (development in progress)
+- [x] v0.3 Planning Loop
+- [ ] v0.3.1 Planning Safety Layer (development in progress)
 
 ## License
 

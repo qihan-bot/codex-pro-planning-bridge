@@ -12,10 +12,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .approval import PlanApprovalStore
 from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
 from .diff import DiffEntry as EngineDiffEntry
 from .diff import PlanDiffResult, diff_plan
+from .intelligence.symbol_graph import build_symbol_graph, export_symbol_graph
 from .intelligence.symbol_index import build_symbol_index, export_symbol_index
 from .memory import ProjectMemory
 from .models import (
@@ -153,6 +155,7 @@ class PlanningLoop:
         self.root = resolve_repo(repo)
         self.workflow = Workflow(self.root, goal=goal, plan=plan)
         self.plan_path = self.workflow.plan or resolve_repo_path(self.root, plan)
+        self.approval = PlanApprovalStore(self.root, plan=self.plan_path)
         self.artifact_dir = self.root / ".codex" / "pro-plan"
         self.base = base
         self.context: ProjectContext | None = None
@@ -211,6 +214,9 @@ class PlanningLoop:
         index_path = self.artifact_dir / "symbol-index.json"
         export_symbol_index(build_symbol_index(self.root), index_path)
         self.artifacts["symbol-index"] = index_path
+        graph_path = self.artifact_dir / "symbol-graph.json"
+        export_symbol_graph(build_symbol_graph(self.root), graph_path)
+        self.artifacts["symbol-graph"] = graph_path
         self.context = self._load_context() or collect_repository(self.root)
         self.workflow.annotate(
             plan=self.plan_path,
@@ -219,11 +225,12 @@ class PlanningLoop:
             ),
         )
         if self.state == WorkflowState.NEW_TASK:
-            self.workflow.transition(
-                WorkflowState.CONTEXT_READY,
-                reason="local context and Pro request prepared",
-                next_action="Review REQUEST.md in ChatGPT Pro and save the approved response as PLAN.md.",
-            )
+                self.workflow.transition(
+                    WorkflowState.CONTEXT_READY,
+                    reason="local context and Pro request prepared",
+                    next_action="Review REQUEST.md in ChatGPT Pro and save the approved response as PLAN.md.",
+                    event="CONTEXT_COLLECTED",
+                )
         return self._result(
             "Review REQUEST.md in ChatGPT Pro and save the approved response as PLAN.md.",
             messages=[
@@ -242,6 +249,7 @@ class PlanningLoop:
                 WorkflowState.PLAN_READY,
                 reason="approved PLAN.md was found locally",
                 next_action="Run local plan validation.",
+                event="PLAN_READY",
             )
 
     def validate_plan(self) -> LoopResult:
@@ -262,12 +270,14 @@ class PlanningLoop:
                 WorkflowState.PLAN_READY,
                 reason="approved PLAN.md was found locally",
                 next_action="Run local plan validation.",
+                event="PLAN_READY",
             )
         if self.state == WorkflowState.PLAN_READY:
             self.workflow.transition(
                 WorkflowState.VALIDATING,
                 reason="starting local plan and repository fact checks",
                 next_action="Review VALIDATION_REPORT.md.",
+                event="PLAN_VALIDATION_STARTED",
             )
         report_path, passed = validate_repository(
             self.root,
@@ -281,10 +291,28 @@ class PlanningLoop:
             warnings=[],
         )
         if passed:
+            if not self.approval.is_approved():
+                approval_path = self.approval.path
+                self.workflow.annotate(
+                    next_action=(
+                        "Review PLAN.md and run cpb approve --repo <repo> "
+                        "before resuming implementation."
+                    ),
+                    error=f"Plan approval required; see {approval_path}",
+                )
+                return self._result(
+                    "Review PLAN.md and run cpb approve before resuming implementation.",
+                    messages=[
+                        "PLAN.md passed local repository and fact checks.",
+                        f"Explicit human approval is required in {approval_path}.",
+                    ],
+                    validation=report,
+                )
             self.workflow.transition(
                 WorkflowState.IMPLEMENTING,
                 reason="PLAN.md passed local validation",
                 next_action="Codex may implement the approved plan; source changes remain explicit.",
+                event="PLAN_VALIDATED",
             )
             return self._result(
                 "Codex may implement the approved plan; source changes remain explicit.",
@@ -318,6 +346,7 @@ class PlanningLoop:
                 WorkflowState.REVIEWING,
                 reason="Codex implementation review requested",
                 next_action="Inspect PLAN_DIFF.md and update project memory.",
+                event="IMPLEMENTATION_REVIEW_STARTED",
             )
         if self.state not in {WorkflowState.REVIEWING, WorkflowState.COMPLETED}:
             raise ValueError(f"cannot review from workflow state {self.state.value}")
@@ -341,6 +370,7 @@ class PlanningLoop:
                 WorkflowState.COMPLETED,
                 reason="implementation drift reviewed and project memory updated",
                 next_action=next_action,
+                event="WORKFLOW_COMPLETED",
             )
         return self._result(
             self.workflow.snapshot.next_action or "Start the next task.",
@@ -352,11 +382,29 @@ class PlanningLoop:
             drift=drift,
         )
 
-    def run(self, *, review: bool = False, reset: bool = False) -> LoopResult:
+    def run(
+        self,
+        *,
+        review: bool = False,
+        reset: bool = False,
+        resume: bool = False,
+    ) -> LoopResult:
         """Advance the session as far as local evidence and explicit approval allow."""
 
         if reset:
             self.workflow.reset(goal=self.workflow.snapshot.goal, plan=self.plan_path)
+        if self.state == WorkflowState.PAUSED:
+            if not resume:
+                return self._result(
+                    "Run cpb resume to continue the paused workflow.",
+                    messages=["Workflow is paused; no work was performed."],
+                )
+            self.workflow.resume()
+        if self.state == WorkflowState.CANCELLED:
+            return self._result(
+                "Start a new workflow with cpb loop --reset when ready.",
+                messages=["Workflow is cancelled; no work was performed."],
+            )
         if self.state == WorkflowState.NEW_TASK:
             self.prepare_context()
         if self.state == WorkflowState.CONTEXT_READY:
@@ -398,12 +446,14 @@ def run_loop(
     base: str | None = None,
     review: bool = False,
     reset: bool = False,
+    resume: bool = False,
 ) -> LoopResult:
     """Convenience entry point used by the unified CLI and integrations."""
 
     return PlanningLoop(repo, goal=goal, plan=plan, base=base).run(
         review=review,
         reset=reset,
+        resume=resume,
     )
 
 

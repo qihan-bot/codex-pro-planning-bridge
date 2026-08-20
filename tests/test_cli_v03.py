@@ -63,6 +63,7 @@ class UnifiedCliV03Tests(unittest.TestCase):
 
             plan_path = root / ".codex" / "pro-plan" / "PLAN.md"
             plan_path.write_text(PLAN, encoding="utf-8")
+            self.assertEqual(main(["approve", "--repo", str(root), "--approved-by", "test-user"]), 0)
             self.assertEqual(main(["loop", "--repo", str(root)]), 0)
             state = (root / ".codex" / "workflow" / "state.json").read_text(encoding="utf-8")
             self.assertIn('"state": "IMPLEMENTING"', state)

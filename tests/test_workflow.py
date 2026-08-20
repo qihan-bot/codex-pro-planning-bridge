@@ -11,7 +11,10 @@ from codex_pro_planning_bridge.workflow import Workflow
 class WorkflowTests(unittest.TestCase):
     def test_transitions_are_explicit_and_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            workflow = Workflow(Path(temporary_directory), goal="Build a loop")
+            workflow = Workflow(Path(temporary_directory), goal="Build a loop", plan="PLAN.md")
+            plan_path = Path(temporary_directory) / "PLAN.md"
+            plan_path.write_text("# Plan\n", encoding="utf-8")
+            workflow.approval.approve("test-user")
 
             for state in (
                 WorkflowState.CONTEXT_READY,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-pro-planning-bridge"
-version = "0.3.0.dev0"
+version = "0.3.1.dev0"
 description = "Local-first bridge for generating ChatGPT Pro architecture planning requests."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,4 +38,3 @@ select = ["E4", "E7", "E9", "F"]
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true
-

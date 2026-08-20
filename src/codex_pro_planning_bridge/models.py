@@ -389,3 +389,5 @@ class WorkflowState(str, Enum):
     REVIEWING = "REVIEWING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    PAUSED = "PAUSED"
+    CANCELLED = "CANCELLED"
