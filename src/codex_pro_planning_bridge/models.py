@@ -35,6 +35,31 @@ class FileInfo:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ProjectType:
+    """Detected language or ecosystem manifests in a repository."""
+
+    python: bool = False
+    node: bool = False
+    rust: bool = False
+    go: bool = False
+    other: tuple[str, ...] = ()
+
+    @property
+    def names(self) -> list[str]:
+        names = [
+            name
+            for name, enabled in (
+                ("python", self.python),
+                ("node", self.node),
+                ("rust", self.rust),
+                ("go", self.go),
+            )
+            if enabled
+        ]
+        return names + list(self.other)
+
+
 @dataclass
 class GitState:
     """Local Git metadata captured alongside a project context."""
