@@ -138,7 +138,7 @@ class SnapshotManager:
     def _selected_runtime(self) -> tuple[WorkflowSnapshot, Path]:
         """Read current workflow metadata without initializing the workflow."""
 
-        workflow = self.state_store.load(default_plan=self.plan_path)
+        workflow = self.state_store.load(default_plan=self.plan_path, migrate=False)
         plan_path = workflow.plan or self.plan_path
         return workflow, plan_path
 
@@ -165,6 +165,13 @@ class SnapshotManager:
             "workflow": {
                 "state": workflow.state.value,
                 "history_position": history_position,
+                "goal": workflow.goal,
+                "started": workflow.started.isoformat(),
+                "updated": workflow.updated.isoformat(),
+                "next_action": workflow.next_action,
+                "paused_from": (
+                    workflow.paused_from.value if workflow.paused_from else None
+                ),
             },
             "plan": {
                 "path": plan_path_value,

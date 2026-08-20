@@ -16,6 +16,7 @@ from .handoff import open_chat
 from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
+from .recovery import RecoveryEngine
 from .snapshot import SnapshotManager
 from .state import WorkflowStateStore
 from .validator import validate as validate_repository
@@ -185,6 +186,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("--reason", default="workflow rollback requested")
     rollback_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="restore workflow metadata from a validated runtime snapshot",
+    )
+    _add_repo_option(recover_parser)
+    recover_parser.add_argument("--snapshot", default="latest")
+    recover_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    recover_parser.add_argument("--reason", default="workflow recovered from snapshot")
+    recover_parser.add_argument("--format", choices=("text", "json"), default="text")
 
     snapshot_parser = subparsers.add_parser(
         "snapshot",
@@ -480,6 +491,23 @@ def _run(args: argparse.Namespace) -> int:
                 f"{snapshot.state.value}"
             )
             print(f"Next action: {snapshot.next_action}")
+        return 0
+
+    if args.command == "recover":
+        recovery_result = RecoveryEngine(args.repo, plan=args.plan).recover(
+            args.snapshot,
+            args.reason,
+        )
+        payload = recovery_result.to_dict()
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"Workflow recovered from snapshot #{recovery_result.snapshot_id}: "
+                f"{recovery_result.state.value}"
+            )
+            print(f"Recovery event: #{recovery_result.recovery_event_index}")
+            print("Next action: review state before continuing.")
         return 0
 
     if args.command == "snapshot":
