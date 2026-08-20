@@ -198,7 +198,7 @@ Memory Update
 
 # v0.3.1 Planning Safety Layer
 
-Status: In progress (`0.3.1.dev0`)
+Status: Complete (`v0.3.1-beta`)
 
 Features:
 
@@ -207,6 +207,27 @@ Features:
 - `cpb status`, `resume`, `pause`, `cancel`, and `history`
 - local symbol ownership, import, and call relationship graph
 - recovery and approval-flow tests
+
+Constraints remain local-first: no OpenAI API calls, API keys, browser
+automation, autonomous source modification, or bypassing human approval.
+
+---
+
+# v0.3.2 Hardening
+
+Status: Complete (`v0.3.2`)
+
+Goal:
+
+Strengthen the local control plane before introducing any multi-agent
+planning capabilities.
+
+Features:
+
+- approval hash and plan-path binding with explicit invalidation reasons
+- read-only event query CLI with stable event indexes and filters
+- compensating workflow rollback that preserves the append-only audit log
+- expanded Python, JavaScript/TypeScript, and Rust symbol graph coverage
 
 Constraints remain local-first: no OpenAI API calls, API keys, browser
 automation, autonomous source modification, or bypassing human approval.

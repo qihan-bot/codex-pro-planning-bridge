@@ -119,6 +119,19 @@ class WorkflowEvent:
         }
 
 
+@dataclass(frozen=True)
+class WorkflowEventRecord:
+    """One indexed event returned by a read-only event query."""
+
+    index: int
+    event: WorkflowEvent
+
+    def to_dict(self) -> dict[str, object]:
+        payload = self.event.to_dict()
+        payload["index"] = self.index
+        return payload
+
+
 def _snapshot_from_dict(root: Path, value: dict[str, Any]) -> WorkflowSnapshot:
     plan_value = value.get("plan")
     plan = resolve_repo_path(root, str(plan_value)) if plan_value else None
@@ -340,6 +353,124 @@ class WorkflowStateStore:
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
         return result
+
+    def query_events(
+        self,
+        *,
+        event: str | None = None,
+        actor: str | None = None,
+        from_state: WorkflowState | str | None = None,
+        to_state: WorkflowState | str | None = None,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        limit: int | None = None,
+    ) -> list[WorkflowEventRecord]:
+        """Query the append-only event log without changing repository state.
+
+        Indexes are one-based positions in the valid event stream. They are
+        stable for existing records as long as the append-only log is kept
+        intact, and can therefore be used by the rollback command.
+        """
+
+        if limit is not None and limit < 0:
+            raise ValueError("event query limit must not be negative")
+        if limit == 0:
+            return []
+        from_value = _state_value(from_state) if from_state is not None else None
+        to_value = _state_value(to_state) if to_state is not None else None
+        since_value = self._query_datetime(since, "since")
+        until_value = self._query_datetime(until, "until")
+        if since_value and until_value and since_value > until_value:
+            raise ValueError("event query since must not be later than until")
+        event_value = event.casefold() if event else None
+        actor_value = actor.casefold() if actor else None
+        result: list[WorkflowEventRecord] = []
+        for index, item in enumerate(self.events(), start=1):
+            if event_value and item.event.casefold() != event_value:
+                continue
+            if actor_value and item.actor.casefold() != actor_value:
+                continue
+            if from_value is not None and item.from_state != from_value:
+                continue
+            if to_value is not None and item.to_state != to_value:
+                continue
+            if since_value and item.timestamp < since_value:
+                continue
+            if until_value and item.timestamp > until_value:
+                continue
+            result.append(WorkflowEventRecord(index=index, event=item))
+            if limit is not None and len(result) >= limit:
+                break
+        return result
+
+    @staticmethod
+    def _query_datetime(value: datetime | str | None, label: str) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            try:
+                parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError(f"event query {label} must be an ISO-8601 timestamp") from error
+        else:
+            raise ValueError(f"event query {label} must be an ISO-8601 timestamp")
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def rollback(
+        self,
+        event_index: int,
+        *,
+        reason: str,
+        snapshot: WorkflowSnapshot | None = None,
+    ) -> WorkflowSnapshot:
+        """Restore workflow metadata to a prior event target state.
+
+        Rollback is deliberately state-only: source files and planning
+        artifacts are never changed. The compensating ``WORKFLOW_ROLLBACK``
+        event is appended after the original log so the audit trail remains
+        complete.
+        """
+
+        if event_index < 1:
+            raise ValueError("rollback event index must be a positive integer")
+        if not reason.strip():
+            raise ValueError("workflow rollback reason must not be empty")
+        current = snapshot or self.load()
+        records = self.events()
+        if event_index >= len(records):
+            raise ValueError(
+                "rollback target must be an earlier event index "
+                f"(1-{max(len(records) - 1, 0)})"
+            )
+        target = records[event_index - 1]
+        paused_from = target.from_state if target.to_state == WorkflowState.PAUSED else None
+        if target.to_state == WorkflowState.PAUSED and paused_from is None:
+            raise ValueError("cannot rollback to a paused event without a resumable state")
+        now = _now()
+        updated = WorkflowSnapshot(
+            state=target.to_state,
+            plan=current.plan,
+            goal=current.goal,
+            started=current.started,
+            updated=now,
+            next_action=f"Review the workflow after rolling back to event #{event_index}.",
+            error=None,
+            paused_from=paused_from,
+        )
+        self.save(updated)
+        self.record(
+            WorkflowTransition(
+                from_state=current.state,
+                to_state=target.to_state,
+                at=now,
+                reason=f"rollback to event #{event_index}: {reason.strip()}",
+                event="WORKFLOW_ROLLBACK",
+                actor="user",
+            )
+        )
+        return updated
 
     def reset(
         self,

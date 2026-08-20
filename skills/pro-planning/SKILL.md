@@ -21,12 +21,13 @@ Workflow:
 4. Ask the user to paste the reviewed request into ChatGPT Pro manually; do not use an API or automated browser flow.
 5. Save the response as `.codex/pro-plan/PLAN.md`.
 6. Run `cpb validate --repo .` and report errors or warnings.
-7. After human review, run `cpb approve --repo . --approved-by user`; the bridge will not enter `IMPLEMENTING` without this matching approval record.
+7. After human review, run `cpb approve --repo . --approved-by user`; the bridge will not enter `IMPLEMENTING` without an approval record bound to the current plan path and SHA-256 hash.
 8. Use the validated and approved plan as an input to implementation, confirming any open questions first.
 9. Use `cpb status`, `cpb pause`, `cpb resume`, `cpb cancel`, and `cpb history` to inspect or recover interrupted workflows.
-10. After implementation, run `cpb diff --repo . --base <baseline>` to detect drift, including renamed paths.
-11. Initialize or update `.codex/project-memory/` with `cpb memory init`, `cpb memory list`, and `cpb memory record-plan`; use `memory migrate` for old metadata and `memory adr-create` for explicit decisions.
-12. Use `cpb loop --review --base <baseline>` after implementation to write the diff report and persist the planning record.
+10. Use `cpb events --repo .` for read-only event filtering, and `cpb rollback --repo . --to <event-index>` only when an explicit workflow recovery is required; rollback never edits source files.
+11. After implementation, run `cpb diff --repo . --base <baseline>` to detect drift, including renamed paths.
+12. Initialize or update `.codex/project-memory/` with `cpb memory init`, `cpb memory list`, and `cpb memory record-plan`; use `memory migrate` for old metadata and `memory adr-create` for explicit decisions.
+13. Use `cpb loop --review --base <baseline>` after implementation to write the diff report and persist the planning record.
 
 When the package is installed, the equivalent command is:
 

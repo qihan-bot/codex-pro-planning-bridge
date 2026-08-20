@@ -211,17 +211,27 @@ class Workflow:
 
         if self.state in {WorkflowState.COMPLETED, WorkflowState.CANCELLED}:
             raise ValueError(f"cannot cancel workflow in state {self.state.value}")
-        if self.state == WorkflowState.PAUSED:
-            target = WorkflowState.CANCELLED
-        else:
-            target = WorkflowState.CANCELLED
         return self.transition(
-            target,
+            WorkflowState.CANCELLED,
             reason=reason,
             next_action="Start a new workflow with cpb loop --reset when ready.",
             event="WORKFLOW_CANCELLED",
             actor="user",
         )
+
+    def rollback(self, event_index: int, reason: str = "workflow rollback requested") -> WorkflowSnapshot:
+        """Restore workflow metadata to an earlier event target state.
+
+        This is an explicit compensating action. It never edits source files,
+        plan artifacts, or prior event records.
+        """
+
+        self.snapshot = self.store.rollback(
+            event_index,
+            reason=reason,
+            snapshot=self.snapshot,
+        )
+        return self.snapshot
 
     def fail(self, reason: str, *, error: str | None = None) -> WorkflowSnapshot:
         """Record an operational failure without allowing a silent state jump."""
