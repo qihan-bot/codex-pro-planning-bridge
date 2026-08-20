@@ -44,7 +44,7 @@ Features:
 
 # v0.2 Intelligent Planning Loop
 
-Status: Release candidate (`0.2.0rc1`)
+Status: Beta (`v0.2.0-beta`)
 
 Goal:
 
@@ -192,5 +192,3 @@ Capabilities:
 - implementation guidance
 - continuous validation
 - project memory
-- engineering decision tracking
-

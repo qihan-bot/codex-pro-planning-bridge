@@ -1,6 +1,6 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.2.0 release candidate** (`0.2.0rc1`).
+Release status: **v0.2.0-beta** (`0.2.0b1`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
@@ -141,7 +141,7 @@ The project is packaged with `pyproject.toml` and exposes the `codex-pro-plannin
 - [x] Project Memory
 - [x] Plan Diff Engine
 - [x] Unified CLI and compatibility wrappers
-- [x] v0.2.0 release candidate
+- [x] v0.2.0-beta
 - [ ] v0.3 proactive planning assistance
 
 ## License
