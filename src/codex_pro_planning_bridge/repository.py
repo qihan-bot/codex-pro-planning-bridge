@@ -127,6 +127,38 @@ def run_git(repo: Path, args: Iterable[str]) -> str | None:
     return result.stdout.strip()
 
 
+def git_repository_state(
+    repo: str | Path = ".",
+    *,
+    excluded_paths: Iterable[str | Path] = (),
+) -> tuple[str | None, bool | None]:
+    """Return the current commit and dirty flag with local artifact exclusions."""
+
+    root = resolve_repo(repo)
+    commit = run_git(root, ("rev-parse", "HEAD"))
+    if commit is None:
+        return None, None
+    excluded = {
+        Path(str(path)).as_posix().strip("/")
+        for path in excluded_paths
+    }
+    status = run_git(root, ("status", "--porcelain", "--untracked-files=all"))
+    if not status:
+        return commit, False
+    dirty = False
+    for line in status.splitlines():
+        path = _status_path(line)
+        normalized = Path(path).as_posix().strip("/")
+        if any(
+            normalized == prefix or normalized.startswith(f"{prefix}/")
+            for prefix in excluded
+        ):
+            continue
+        dirty = True
+        break
+    return commit, dirty
+
+
 def list_repository_paths(repo: Path, *, include_hidden: bool = False) -> list[str] | None:
     """List Git-known paths, falling back to a bounded filesystem walk."""
 

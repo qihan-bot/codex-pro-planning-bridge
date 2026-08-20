@@ -13,9 +13,12 @@ from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
 from .diff import diff_plan, render_plan_diff
 from .handoff import open_chat
+from .integrity import IntegrityChecker
 from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
+from .recovery import RecoveryEngine
+from .snapshot import SnapshotManager
 from .state import WorkflowStateStore
 from .validator import validate as validate_repository
 from .workflow import Workflow
@@ -116,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_option(approve_parser)
     approve_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
     approve_parser.add_argument("--approved-by", default="user")
+    approve_parser.add_argument(
+        "--expires-in",
+        type=int,
+        default=None,
+        help="approval validity window in seconds",
+    )
     approve_parser.add_argument("--revoke", action="store_true")
     approve_parser.add_argument("--reason", default="plan approval revoked")
     approve_parser.add_argument("--format", choices=("text", "json"), default="text")
@@ -137,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
     resume_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
     resume_parser.add_argument("--review", action="store_true")
+    resume_parser.add_argument(
+        "--snapshot",
+        default="latest",
+        help="snapshot id used for the pre-resume integrity check",
+    )
     resume_parser.add_argument("--format", choices=("text", "json"), default="text")
 
     pause_parser = subparsers.add_parser("pause", help="pause the current workflow")
@@ -184,6 +198,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("--reason", default="workflow rollback requested")
     rollback_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    recover_parser = subparsers.add_parser(
+        "recover",
+        help="restore workflow metadata from a validated runtime snapshot",
+    )
+    _add_repo_option(recover_parser)
+    recover_parser.add_argument("--snapshot", default="latest")
+    recover_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    recover_parser.add_argument("--reason", default="workflow recovered from snapshot")
+    recover_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_parser = subparsers.add_parser(
+        "snapshot",
+        help="create and inspect local workflow runtime snapshots",
+    )
+    snapshot_subparsers = snapshot_parser.add_subparsers(
+        dest="snapshot_command",
+        required=True,
+    )
+
+    snapshot_create = snapshot_subparsers.add_parser(
+        "create",
+        help="capture the current workflow runtime context",
+    )
+    _add_repo_option(snapshot_create)
+    snapshot_create.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    snapshot_create.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_list = snapshot_subparsers.add_parser(
+        "list",
+        help="list immutable workflow runtime snapshots",
+    )
+    _add_repo_option(snapshot_list)
+    snapshot_list.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_show = snapshot_subparsers.add_parser(
+        "show",
+        help="show one workflow runtime snapshot",
+    )
+    _add_repo_option(snapshot_show)
+    snapshot_show.add_argument("snapshot_id", nargs="?", default=None)
+    snapshot_show.add_argument("--id", dest="snapshot_id_option", default=None)
+    snapshot_show.add_argument("--format", choices=("text", "json"), default="text")
 
     memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
@@ -368,13 +425,18 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "approve":
         approval = PlanApprovalStore(args.repo, plan=args.plan)
-        path = approval.revoke(args.reason) if args.revoke else approval.approve(args.approved_by)
+        path = (
+            approval.revoke(args.reason)
+            if args.revoke
+            else approval.approve(args.approved_by, expires_in=args.expires_in)
+        )
         payload = approval.status()
         if args.format == "json":
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             action = "revoked" if args.revoke else "recorded"
             print(f"Plan approval {action}: {path}")
+            print(f"Approval status: {payload['status']}")
             print(f"Effective approval: {payload['effective']}")
         return 0
 
@@ -448,9 +510,90 @@ def _run(args: argparse.Namespace) -> int:
             print(f"Next action: {snapshot.next_action}")
         return 0
 
+    if args.command == "recover":
+        recovery_result = RecoveryEngine(args.repo, plan=args.plan).recover(
+            args.snapshot,
+            args.reason,
+        )
+        payload = recovery_result.to_dict()
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"Workflow recovered from snapshot #{recovery_result.snapshot_id}: "
+                f"{recovery_result.state.value}"
+            )
+            print(f"Recovery event: #{recovery_result.recovery_event_index}")
+            print("Next action: review state before continuing.")
+        return 0
+
+    if args.command == "snapshot":
+        manager = SnapshotManager(
+            args.repo,
+            plan=getattr(args, "plan", ".codex/pro-plan/PLAN.md"),
+        )
+        if args.snapshot_command == "create":
+            created_record = manager.create()
+            payload = {
+                "snapshot_path": str(created_record.path),
+                **created_record.to_dict(),
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    f"Created workflow snapshot #{created_record.snapshot_id}: "
+                    f"{created_record.path}"
+                )
+                print(f"State: {created_record.payload['workflow']['state']}")
+                print(
+                    f"History position: "
+                    f"{created_record.payload['workflow']['history_position']}"
+                )
+            return 0
+        if args.snapshot_command == "list":
+            snapshot_records = manager.list_snapshots()
+            payload = {
+                "count": len(snapshot_records),
+                "snapshots": [
+                    {
+                        "snapshot_path": str(snapshot_record.path),
+                        **snapshot_record.to_dict(),
+                    }
+                    for snapshot_record in snapshot_records
+                ],
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Snapshots: {len(snapshot_records)}")
+                for snapshot_record in snapshot_records:
+                    snapshot_payload = snapshot_record.payload
+                    print(
+                        f"#{snapshot_record.snapshot_id} {snapshot_payload['timestamp']} "
+                        f"{snapshot_payload['workflow']['state']} {snapshot_record.path}"
+                    )
+            return 0
+        if args.snapshot_command == "show":
+            selected_id = args.snapshot_id_option or args.snapshot_id
+            shown_record = manager.show(selected_id)
+            payload = {
+                "snapshot_path": str(shown_record.path),
+                **shown_record.to_dict(),
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Workflow snapshot #{shown_record.snapshot_id}: {shown_record.path}")
+                print(json.dumps(shown_record.to_dict(), indent=2, ensure_ascii=False))
+            return 0
+        raise AssertionError(f"unknown snapshot command: {args.snapshot_command}")
+
     if args.command == "pause":
         snapshot = Workflow(args.repo).pause(args.reason)
+        runtime_snapshot = SnapshotManager(args.repo).create()
         print(f"Workflow paused from {snapshot.paused_from.value if snapshot.paused_from else 'unknown'}.")
+        print(f"Runtime snapshot created: {runtime_snapshot.path}")
         return 0
 
     if args.command == "cancel":
@@ -459,7 +602,22 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "resume":
-        loop_result = run_loop(
+        integrity_report = IntegrityChecker(args.repo, plan=args.plan).check(
+            args.snapshot
+        )
+        if not integrity_report.passed:
+            if args.format == "json":
+                print(
+                    json.dumps(
+                        {"integrity": integrity_report.to_dict()},
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print(integrity_report.render())
+            return 1
+        resume_result = run_loop(
             args.repo,
             goal=args.user_request,
             plan=args.plan,
@@ -467,8 +625,14 @@ def _run(args: argparse.Namespace) -> int:
             review=args.review,
             resume=True,
         )
-        _print_loop_result(loop_result, args.format)
-        return 0 if loop_result.ok else 1
+        if args.format == "json":
+            resume_payload = resume_result.to_dict()
+            resume_payload["integrity"] = integrity_report.to_dict()
+            print(json.dumps(resume_payload, indent=2, ensure_ascii=False))
+        else:
+            print(integrity_report.render())
+            _print_loop_result(resume_result, args.format)
+        return 0 if resume_result.ok else 1
 
     if args.command == "loop":
         loop_result = run_loop(

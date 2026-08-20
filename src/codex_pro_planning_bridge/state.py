@@ -204,6 +204,7 @@ class WorkflowStateStore:
         *,
         default_goal: str = "",
         default_plan: str | Path | None = None,
+        migrate: bool = True,
     ) -> WorkflowSnapshot:
         """Load state, migrating the original unversioned shape when needed."""
 
@@ -226,7 +227,7 @@ class WorkflowStateStore:
             snapshot.goal = default_goal
         if snapshot.plan is None and default_plan:
             snapshot.plan = resolve_repo_path(self.root, default_plan)
-        if schema_version < WORKFLOW_SCHEMA_VERSION:
+        if migrate and schema_version < WORKFLOW_SCHEMA_VERSION:
             self.save(snapshot)
         return snapshot
 
@@ -253,20 +254,21 @@ class WorkflowStateStore:
         )
         return snapshot
 
-    def history(self) -> list[WorkflowTransition]:
+    def history(self, *, migrate: bool = True) -> list[WorkflowTransition]:
         """Return the transition history, accepting the pre-v0.3 list shape."""
 
         raw = self._read_json(self.history_path, {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": []})
         if isinstance(raw, list):
             events = raw
-            write_text(
-                self.history_path,
-                json.dumps(
-                    {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-            )
+            if migrate:
+                write_text(
+                    self.history_path,
+                    json.dumps(
+                        {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                )
         elif isinstance(raw, dict):
             history_version = int(raw.get("schema_version", 0))
             if history_version > WORKFLOW_SCHEMA_VERSION:

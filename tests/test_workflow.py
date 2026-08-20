@@ -27,7 +27,7 @@ class WorkflowTests(unittest.TestCase):
                 workflow.transition(state, reason=f"advance to {state.value}")
 
             self.assertEqual(workflow.state, WorkflowState.COMPLETED)
-            self.assertEqual(len(workflow.history), 7)
+            self.assertEqual(len(workflow.history), 8)
             self.assertEqual(workflow.history[-1].to_state, WorkflowState.COMPLETED)
 
     def test_invalid_transition_is_rejected(self) -> None:

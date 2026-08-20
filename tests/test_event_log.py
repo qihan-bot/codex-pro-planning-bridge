@@ -30,7 +30,7 @@ class WorkflowEventLogTests(unittest.TestCase):
             first_lines = (root / ".codex" / "workflow" / "events.jsonl").read_text(
                 encoding="utf-8"
             ).splitlines()
-            self.assertEqual(len(first_lines), 2)
+            self.assertEqual(len(first_lines), 3)
             first_record = json.loads(first_lines[0])
             self.assertEqual(first_record["schema_version"], 1)
             self.assertEqual(first_record["event"], "WORKFLOW_INITIALIZED")
@@ -44,8 +44,8 @@ class WorkflowEventLogTests(unittest.TestCase):
             second_lines = (root / ".codex" / "workflow" / "events.jsonl").read_text(
                 encoding="utf-8"
             ).splitlines()
-            self.assertEqual(len(second_lines), 3)
-            self.assertEqual(second_lines[:2], first_lines)
+            self.assertEqual(len(second_lines), 4)
+            self.assertEqual(second_lines[: len(first_lines)], first_lines)
             self.assertEqual(WorkflowStateStore(root).events()[-1].event, "PLAN_READY")
 
     def test_event_query_filters_are_read_only_and_keep_original_indexes(self) -> None:
