@@ -44,7 +44,7 @@ Features:
 
 # v0.2 Intelligent Planning Loop
 
-Status: Beta (`v0.2.0-beta`)
+Status: Complete (`v0.2.0-beta`)
 
 Goal:
 
@@ -139,6 +139,26 @@ Store:
 
 ---
 
+# v0.2.1 Architecture Hardening
+
+Status: Complete (`v0.2.1`)
+
+Goal:
+
+Stabilize the planning infrastructure before implementing the v0.3 Planning Loop.
+
+Features:
+
+- Shared typed models for context, plans, facts, memory, and drift reports
+- Layered Context Collector with scanner, detector, filters, and exporters
+- Machine-readable `.codex/pro-plan/context.json`
+- ADR-based Project Memory with versioned `memory.json`
+- Rename-aware Plan Diff and possible symbol matches in Validator reports
+- `cpb` bootstrap/prompt CLI aliases with compatibility wrappers
+- Reusable test fixtures, Ruff, mypy, compile checks, and GitHub Actions CI
+
+---
+
 # v0.3 Autonomous Planning Assistance
 
 Goal:
@@ -192,3 +212,5 @@ Capabilities:
 - implementation guidance
 - continuous validation
 - project memory
+- engineering decision tracking
+

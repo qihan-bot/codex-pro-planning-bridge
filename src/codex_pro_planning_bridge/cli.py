@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_write.add_argument("--content", required=True)
     memory_write.add_argument("--append", action="store_true")
 
-    memory_record = memory_subparsers.add_parser("record-plan", help="record a PLAN.md summary in decisions.md")
+    memory_record = memory_subparsers.add_parser("record-plan", help="record a PLAN.md summary as an ADR")
     _add_repo_option(memory_record)
     memory_record.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
 
