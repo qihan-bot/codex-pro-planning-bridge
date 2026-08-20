@@ -16,6 +16,7 @@ from .handoff import open_chat
 from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
+from .snapshot import SnapshotManager
 from .state import WorkflowStateStore
 from .validator import validate as validate_repository
 from .workflow import Workflow
@@ -184,6 +185,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rollback_parser.add_argument("--reason", default="workflow rollback requested")
     rollback_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_parser = subparsers.add_parser(
+        "snapshot",
+        help="create and inspect local workflow runtime snapshots",
+    )
+    snapshot_subparsers = snapshot_parser.add_subparsers(
+        dest="snapshot_command",
+        required=True,
+    )
+
+    snapshot_create = snapshot_subparsers.add_parser(
+        "create",
+        help="capture the current workflow runtime context",
+    )
+    _add_repo_option(snapshot_create)
+    snapshot_create.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    snapshot_create.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_list = snapshot_subparsers.add_parser(
+        "list",
+        help="list immutable workflow runtime snapshots",
+    )
+    _add_repo_option(snapshot_list)
+    snapshot_list.add_argument("--format", choices=("text", "json"), default="text")
+
+    snapshot_show = snapshot_subparsers.add_parser(
+        "show",
+        help="show one workflow runtime snapshot",
+    )
+    _add_repo_option(snapshot_show)
+    snapshot_show.add_argument("snapshot_id", nargs="?", default=None)
+    snapshot_show.add_argument("--id", dest="snapshot_id_option", default=None)
+    snapshot_show.add_argument("--format", choices=("text", "json"), default="text")
 
     memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
     memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
@@ -447,6 +481,68 @@ def _run(args: argparse.Namespace) -> int:
             )
             print(f"Next action: {snapshot.next_action}")
         return 0
+
+    if args.command == "snapshot":
+        manager = SnapshotManager(
+            args.repo,
+            plan=getattr(args, "plan", ".codex/pro-plan/PLAN.md"),
+        )
+        if args.snapshot_command == "create":
+            created_record = manager.create()
+            payload = {
+                "snapshot_path": str(created_record.path),
+                **created_record.to_dict(),
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    f"Created workflow snapshot #{created_record.snapshot_id}: "
+                    f"{created_record.path}"
+                )
+                print(f"State: {created_record.payload['workflow']['state']}")
+                print(
+                    f"History position: "
+                    f"{created_record.payload['workflow']['history_position']}"
+                )
+            return 0
+        if args.snapshot_command == "list":
+            snapshot_records = manager.list_snapshots()
+            payload = {
+                "count": len(snapshot_records),
+                "snapshots": [
+                    {
+                        "snapshot_path": str(snapshot_record.path),
+                        **snapshot_record.to_dict(),
+                    }
+                    for snapshot_record in snapshot_records
+                ],
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Snapshots: {len(snapshot_records)}")
+                for snapshot_record in snapshot_records:
+                    snapshot_payload = snapshot_record.payload
+                    print(
+                        f"#{snapshot_record.snapshot_id} {snapshot_payload['timestamp']} "
+                        f"{snapshot_payload['workflow']['state']} {snapshot_record.path}"
+                    )
+            return 0
+        if args.snapshot_command == "show":
+            selected_id = args.snapshot_id_option or args.snapshot_id
+            shown_record = manager.show(selected_id)
+            payload = {
+                "snapshot_path": str(shown_record.path),
+                **shown_record.to_dict(),
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Workflow snapshot #{shown_record.snapshot_id}: {shown_record.path}")
+                print(json.dumps(shown_record.to_dict(), indent=2, ensure_ascii=False))
+            return 0
+        raise AssertionError(f"unknown snapshot command: {args.snapshot_command}")
 
     if args.command == "pause":
         snapshot = Workflow(args.repo).pause(args.reason)

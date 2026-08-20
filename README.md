@@ -1,6 +1,7 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.3.2 Hardening** (`0.3.2`).
+Release status: **v0.3.2 Hardening** (`0.3.2`); v0.3.3 Reliability Layer
+is in progress with the Workflow Snapshot Manager.
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
@@ -110,6 +111,11 @@ cpb events --repo . --actor user --limit 20
 
 # Restore workflow metadata to an earlier event; source files are untouched.
 cpb rollback --repo . --to 3 --reason "retry validation"
+
+# Capture and inspect complete local workflow runtime snapshots.
+cpb snapshot create --repo .
+cpb snapshot list --repo .
+cpb snapshot show --repo . --id latest
 ```
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
@@ -168,6 +174,21 @@ restores only workflow metadata to event `N` and appends a
 `WORKFLOW_ROLLBACK` event, preserving all earlier audit records and repository
 files.
 
+### v0.3.3 Reliability Layer: Snapshot Manager
+
+The first v0.3.3 component captures a complete local runtime context under
+`.codex/workflow/snapshots/`. Numbered JSON files such as
+`001.json` are immutable, while `latest.json` is a deterministic
+copy of the newest snapshot. Each snapshot records the workflow state and
+event position, the repository-relative plan path and SHA-256, current
+approval binding metadata, the Git commit and dirty flag, and the Project
+Memory version.
+
+Snapshot creation is read-only with respect to source files, `PLAN.md`,
+approval artifacts, event records, and Project Memory; it only writes the new
+numbered snapshot and `latest.json`. Recovery, integrity checking, and the
+approval lifecycle remain separate follow-up phases of v0.3.3.
+
 The local repository intelligence layer is in
 `src/codex_pro_planning_bridge/intelligence/symbol_index.py` and
 `symbol_graph.py`. They support Python AST extraction and conservative
@@ -210,6 +231,7 @@ The v0.3 workflow layers are:
 src/codex_pro_planning_bridge/
 ├── approval.py    # explicit PLAN.md approval records
 ├── state.py       # versioned state/history/event persistence
+├── snapshot.py    # immutable workflow runtime snapshots
 ├── workflow.py    # explicit transition rules
 ├── loop.py        # context → validation → review orchestration
 └── intelligence/
@@ -264,6 +286,7 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] v0.3 Planning Loop
 - [x] v0.3.1 Planning Safety Layer (`v0.3.1-beta`)
 - [x] v0.3.2 Hardening (`v0.3.2`)
+- [ ] v0.3.3 Reliability Layer (in progress: Snapshot Manager / Issue #8)
 
 ## License
 
