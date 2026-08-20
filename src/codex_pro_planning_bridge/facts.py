@@ -11,7 +11,10 @@ import re
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:  # pragma: no cover - defensive fallback
+        tomllib = None  # type: ignore[assignment]
 
 from .repository import iter_project_files
 
@@ -292,3 +295,4 @@ def build_repository_facts(repo: str | Path = ".") -> RepositoryFacts:
         elif suffix in {".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".cs", ".c", ".cpp", ".h"}:
             _add_regex_symbols(facts, content, suffix)
     return facts
+
