@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +334,16 @@ class DiffEntry:
     references: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SymbolChange:
+    """One symbol-level change between two repository snapshots."""
+
+    name: str
+    kind: str
+    before_paths: tuple[str, ...] = ()
+    after_paths: tuple[str, ...] = ()
+
+
 @dataclass
 class DriftReport:
     """Structured drift report shared by CLI and future planning loops."""
@@ -344,3 +355,37 @@ class DriftReport:
     changed: list[DiffEntry] = field(default_factory=list)
     blocked: list[DiffEntry] = field(default_factory=list)
     unplanned_changes: list[str] = field(default_factory=list)
+    symbol_changes: list[SymbolChange] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible drift summary."""
+
+        return {
+            "plan_path": str(self.plan_path),
+            "changed_files": list(self.changed_files),
+            "completed": [asdict(item) for item in self.completed],
+            "missing": [asdict(item) for item in self.missing],
+            "changed": [asdict(item) for item in self.changed],
+            "blocked": [asdict(item) for item in self.blocked],
+            "unplanned_changes": list(self.unplanned_changes),
+            "symbol_changes": [asdict(item) for item in self.symbol_changes],
+            "ok": not (
+                self.missing
+                or self.changed
+                or self.blocked
+                or self.unplanned_changes
+            ),
+        }
+
+
+class WorkflowState(str, Enum):
+    """Explicit states used by the recoverable v0.3 planning workflow."""
+
+    NEW_TASK = "NEW_TASK"
+    CONTEXT_READY = "CONTEXT_READY"
+    PLAN_READY = "PLAN_READY"
+    VALIDATING = "VALIDATING"
+    IMPLEMENTING = "IMPLEMENTING"
+    REVIEWING = "REVIEWING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
