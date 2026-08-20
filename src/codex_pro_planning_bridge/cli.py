@@ -13,6 +13,7 @@ from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
 from .diff import diff_plan, render_plan_diff
 from .handoff import open_chat
+from .integrity import IntegrityChecker
 from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
@@ -139,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
     resume_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
     resume_parser.add_argument("--review", action="store_true")
+    resume_parser.add_argument(
+        "--snapshot",
+        default="latest",
+        help="snapshot id used for the pre-resume integrity check",
+    )
     resume_parser.add_argument("--format", choices=("text", "json"), default="text")
 
     pause_parser = subparsers.add_parser("pause", help="pause the current workflow")
@@ -574,7 +580,9 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "pause":
         snapshot = Workflow(args.repo).pause(args.reason)
+        runtime_snapshot = SnapshotManager(args.repo).create()
         print(f"Workflow paused from {snapshot.paused_from.value if snapshot.paused_from else 'unknown'}.")
+        print(f"Runtime snapshot created: {runtime_snapshot.path}")
         return 0
 
     if args.command == "cancel":
@@ -583,7 +591,22 @@ def _run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "resume":
-        loop_result = run_loop(
+        integrity_report = IntegrityChecker(args.repo, plan=args.plan).check(
+            args.snapshot
+        )
+        if not integrity_report.passed:
+            if args.format == "json":
+                print(
+                    json.dumps(
+                        {"integrity": integrity_report.to_dict()},
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print(integrity_report.render())
+            return 1
+        resume_result = run_loop(
             args.repo,
             goal=args.user_request,
             plan=args.plan,
@@ -591,8 +614,14 @@ def _run(args: argparse.Namespace) -> int:
             review=args.review,
             resume=True,
         )
-        _print_loop_result(loop_result, args.format)
-        return 0 if loop_result.ok else 1
+        if args.format == "json":
+            resume_payload = resume_result.to_dict()
+            resume_payload["integrity"] = integrity_report.to_dict()
+            print(json.dumps(resume_payload, indent=2, ensure_ascii=False))
+        else:
+            print(integrity_report.render())
+            _print_loop_result(resume_result, args.format)
+        return 0 if resume_result.ok else 1
 
     if args.command == "loop":
         loop_result = run_loop(

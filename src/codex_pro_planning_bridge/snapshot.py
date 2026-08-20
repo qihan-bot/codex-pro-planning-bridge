@@ -17,7 +17,12 @@ from typing import Any
 
 from .approval import PlanApprovalStore, plan_digest
 from .memory import MEMORY_METADATA_FILE, ProjectMemory
-from .repository import resolve_repo, resolve_repo_path, run_git, write_text
+from .repository import (
+    resolve_repo,
+    resolve_repo_path,
+    git_repository_state,
+    write_text,
+)
 from .state import WorkflowSnapshot, WorkflowStateStore
 
 
@@ -52,16 +57,6 @@ def _memory_version(root: Path) -> object:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return value
-
-
-def _repository_state(root: Path) -> tuple[str | None, bool | None]:
-    """Return the current Git commit and dirty flag, if Git is available."""
-
-    commit = run_git(root, ("rev-parse", "HEAD"))
-    if commit is None:
-        return None, None
-    status = run_git(root, ("status", "--porcelain", "--untracked-files=all"))
-    return commit, bool(status)
 
 
 @dataclass(frozen=True)
@@ -152,7 +147,10 @@ class SnapshotManager:
         binding = approval.binding_status()
         approval_status = "APPROVED" if binding["effective"] else "UNAPPROVED"
 
-        repository_commit, repository_dirty = _repository_state(self.root)
+        repository_commit, repository_dirty = git_repository_state(
+            self.root,
+            excluded_paths=(SNAPSHOT_DIRECTORY,),
+        )
         history_position = len(self.state_store.events())
         approval_timestamp = (
             approval_record.timestamp.isoformat() if approval_record.timestamp else None

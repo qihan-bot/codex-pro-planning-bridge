@@ -72,7 +72,7 @@ class RecoveryEngine:
         self.snapshots = SnapshotManager(self.root, plan=plan)
         self.store = WorkflowStateStore(self.root)
 
-    def _validate(
+    def validate_snapshot(
         self,
         record: SnapshotRecord,
     ) -> tuple[dict[str, Any], WorkflowState, Path | None, int]:
@@ -181,7 +181,7 @@ class RecoveryEngine:
         if not reason.strip():
             raise ValueError("workflow recovery reason must not be empty")
         record = self.snapshots.show(snapshot_id)
-        workflow_data, state, plan_path, history_position = self._validate(record)
+        workflow_data, state, plan_path, history_position = self.validate_snapshot(record)
         current = self.store.load(migrate=False)
         now = datetime.now(timezone.utc)
         paused_from_value = workflow_data.get("paused_from")
