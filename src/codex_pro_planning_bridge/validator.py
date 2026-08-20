@@ -12,6 +12,7 @@ from .facts import (
     build_repository_facts,
     normalize_dependency,
 )
+from .models import FactFinding
 from .plan import ValidationResult, validate_plan as validate_markdown
 from .repository import resolve_repo, resolve_repo_path, write_text
 
@@ -34,12 +35,7 @@ class PathCheck:
     detail: str
 
 
-@dataclass(frozen=True)
-class Finding:
-    category: str
-    reference: str
-    status: str
-    detail: str
+Finding = FactFinding
 
 
 @dataclass(frozen=True)
@@ -193,12 +189,19 @@ def check_symbols(facts: RepositoryFacts, references: list[str]) -> list[Finding
     findings: list[Finding] = []
     for reference in references:
         found = facts.has_symbol(reference)
+        possible_matches = () if found else tuple(facts.find_symbol_matches(reference))
+        detail = "symbol was found in the local source index"
+        if not found:
+            detail = "symbol was not found in the local source index"
+            if possible_matches:
+                detail += "; possible matches: " + ", ".join(possible_matches)
         findings.append(
             Finding(
                 category="Symbol",
                 reference=reference,
                 status="OK" if found else "ERROR",
-                detail="symbol was found in the local source index" if found else "symbol was not found in the local source index",
+                detail=detail,
+                possible_matches=possible_matches,
             )
         )
     return findings
@@ -255,11 +258,20 @@ def check_dependencies(facts: RepositoryFacts, references: list[DependencyRefere
 
 
 def _render_findings(title: str, findings: list[Finding]) -> list[str]:
-    lines = [f"## {title}", "", "| Reference | Status | Detail |", "| --- | --- | --- |"]
+    lines = [
+        f"## {title}",
+        "",
+        "| Reference | Status | Detail | Possible matches |",
+        "| --- | --- | --- | --- |",
+    ]
     if findings:
-        lines.extend(f"| `{item.reference}` | {item.status} | {item.detail} |" for item in findings)
+        lines.extend(
+            f"| `{item.reference}` | {item.status} | {item.detail} | "
+            f"{', '.join(f'`{match}`' for match in item.possible_matches) or '—'} |"
+            for item in findings
+        )
     else:
-        lines.append("| _none_ | — | No references found |")
+        lines.append("| _none_ | — | No references found | — |")
     return lines
 
 

@@ -74,6 +74,16 @@ class GitState:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class FileChange:
+    """One local Git change, including rename provenance when available."""
+
+    status: str
+    path: str
+    previous_path: str | None = None
+    similarity: int | None = None
+
+
 @dataclass
 class ProjectContext:
     """Machine-readable project understanding shared across workflow stages."""

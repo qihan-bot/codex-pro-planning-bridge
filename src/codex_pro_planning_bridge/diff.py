@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, field
 import re
 from pathlib import Path
 
-from .repository import git_changed_files, resolve_repo, resolve_repo_path, run_git, write_text
+from .models import FileChange, PlanTask
+from .repository import git_file_changes, resolve_repo, resolve_repo_path, run_git, write_text
 from .validator import extract_path_references
 
 
@@ -17,14 +18,6 @@ BLOCKED_RE = re.compile(
     re.IGNORECASE,
 )
 IMPLEMENTATION_HEADINGS = ("implementation", "execution", "tasks", "work items")
-
-
-@dataclass(frozen=True)
-class PlanTask:
-    index: int
-    text: str
-    references: tuple[str, ...] = ()
-    checked: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +37,7 @@ class PlanDiffResult:
     missing: list[DiffEntry] = field(default_factory=list)
     changed: list[DiffEntry] = field(default_factory=list)
     blocked: list[DiffEntry] = field(default_factory=list)
+    renamed_files: list[FileChange] = field(default_factory=list)
     unplanned_changes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -61,6 +55,7 @@ class PlanDiffResult:
             "missing": [asdict(item) for item in self.missing],
             "changed": [asdict(item) for item in self.changed],
             "blocked": [asdict(item) for item in self.blocked],
+            "renamed_files": [asdict(item) for item in self.renamed_files],
             "unplanned_changes": self.unplanned_changes,
             "notes": self.notes,
             "ok": self.ok,
@@ -114,13 +109,15 @@ def compare_plan(
     plan_path: str | Path = ".codex/pro-plan/PLAN.md",
     base: str | None = None,
     changed_files: list[str] | None = None,
+    file_changes: list[FileChange] | None = None,
 ) -> PlanDiffResult:
     """Classify plan tasks against a supplied or locally detected change set."""
 
     root = resolve_repo(repo)
     resolved_plan = resolve_repo_path(root, plan_path)
     tasks = extract_plan_tasks(markdown)
-    source_files = changed_files if changed_files is not None else git_changed_files(root, base=base)
+    source_changes = file_changes if file_changes is not None else git_file_changes(root, base=base)
+    source_files = changed_files if changed_files is not None else [item.path for item in source_changes]
     actual = sorted({path.replace("\\", "/") for path in source_files})
     actual_set = set(actual)
     result = PlanDiffResult(
@@ -128,6 +125,7 @@ def compare_plan(
         base=base,
         changed_files=actual,
         tasks=tasks,
+        renamed_files=[item for item in source_changes if item.previous_path],
     )
     if run_git(root, ("rev-parse", "--git-dir")) is None:
         result.notes.append("Git metadata unavailable; no repository diff could be computed.")
@@ -137,6 +135,11 @@ def compare_plan(
         )
 
     planned_files: set[str] = set()
+    rename_targets: dict[str, str] = {
+        item.previous_path: item.path
+        for item in result.renamed_files
+        if item.previous_path
+    }
     for task in tasks:
         planned_files.update(task.references)
         if BLOCKED_RE.search(task.text) and not task.checked:
@@ -147,6 +150,19 @@ def compare_plan(
                 result.completed.append(_entry(task, "marked complete in PLAN.md; no concrete path to verify"))
             else:
                 result.missing.append(_entry(task, "task has no concrete repository path to verify"))
+            continue
+        renamed_references = [
+            (reference, rename_targets[reference])
+            for reference in task.references
+            if reference in rename_targets
+        ]
+        if renamed_references:
+            details = ", ".join(
+                f"`{old}` → `{new}`" for old, new in renamed_references
+            )
+            result.changed.append(
+                _entry(task, f"planned path was renamed locally: {details}")
+            )
             continue
         touched = sorted(set(task.references) & actual_set)
         if task.checked and not touched:
@@ -160,7 +176,12 @@ def compare_plan(
         else:
             result.missing.append(_entry(task, "none of the referenced paths changed locally"))
 
-    result.unplanned_changes = sorted(actual_set - planned_files)
+    planned_actual_files = planned_files | {
+        new_path
+        for old_path, new_path in rename_targets.items()
+        if old_path in planned_files
+    }
+    result.unplanned_changes = sorted(actual_set - planned_actual_files)
     if result.unplanned_changes:
         result.notes.append("Changed paths not named by an implementation step are reported as drift.")
     if not tasks:
@@ -196,6 +217,15 @@ def render_plan_diff(result: PlanDiffResult) -> str:
     ]
     if result.changed_files:
         lines.extend(f"- `{path}`" for path in result.changed_files)
+    else:
+        lines.append("_None detected._")
+    lines.extend(["", "## Renamed Files", ""])
+    if result.renamed_files:
+        lines.extend(
+            f"- `{item.previous_path}` → `{item.path}`"
+            + (f" ({item.similarity}% similar)" if item.similarity is not None else "")
+            for item in result.renamed_files
+        )
     else:
         lines.append("_None detected._")
     lines.extend([""])

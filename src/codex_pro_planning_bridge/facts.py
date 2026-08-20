@@ -72,6 +72,27 @@ class RepositoryFacts:
     def has_dependency(self, reference: str) -> bool:
         return normalize_dependency(reference) in self.dependencies
 
+    def find_symbol_matches(self, reference: str, *, limit: int = 3) -> list[str]:
+        """Return close local symbols for an unavailable plan reference."""
+
+        target = reference.replace("::", ".").casefold()
+        leaf = target.rsplit(".", 1)[-1]
+        candidates = sorted(self.symbols, key=str.casefold)
+        ranked = sorted(
+            candidates,
+            key=lambda symbol: (
+                0 if symbol.casefold().endswith(leaf) else 1,
+                0 if leaf in symbol.casefold() else 1,
+                symbol.casefold(),
+            ),
+        )
+        matches = [
+            symbol
+            for symbol in ranked
+            if target in symbol.casefold() or leaf in symbol.casefold()
+        ]
+        return matches[:limit]
+
 
 class _PythonSymbolVisitor(ast.NodeVisitor):
     def __init__(self) -> None:

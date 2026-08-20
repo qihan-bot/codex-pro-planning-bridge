@@ -13,6 +13,8 @@ import re
 import subprocess
 from typing import Iterable
 
+from .models import FileChange
+
 
 DEFAULT_EXCLUDED_DIRS = {
     ".git",
@@ -212,27 +214,91 @@ def git_changed_files(repo: str | Path = ".", *, base: str | None = None) -> lis
     code.
     """
 
+    return sorted({change.path for change in git_file_changes(repo, base=base)})
+
+
+def _parse_name_status(output: str | None) -> list[FileChange]:
+    changes: list[FileChange] = []
+    if not output:
+        return changes
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 3 and fields[0].startswith(("R", "C")):
+            status = fields[0][0]
+            similarity = None
+            try:
+                similarity = int(fields[0][1:])
+            except ValueError:
+                pass
+            changes.append(
+                FileChange(
+                    status=status,
+                    previous_path=fields[-2].replace("\\", "/"),
+                    path=fields[-1].replace("\\", "/"),
+                    similarity=similarity,
+                )
+            )
+            continue
+        if len(fields) >= 2:
+            changes.append(
+                FileChange(status=fields[0][0], path=fields[-1].replace("\\", "/"))
+            )
+    return changes
+
+
+def _status_changes(output: str | None) -> list[FileChange]:
+    changes: list[FileChange] = []
+    if not output:
+        return changes
+    for line in output.splitlines():
+        if len(line) < 3:
+            continue
+        code = line[:2].strip()
+        path = line[3:].strip().strip('"').replace("\\", "/")
+        if " -> " in path:
+            previous, current = path.rsplit(" -> ", 1)
+            changes.append(FileChange(status="R", previous_path=previous, path=current))
+        elif path:
+            changes.append(FileChange(status=code[:1] or "M", path=path))
+    return changes
+
+
+def git_file_changes(repo: str | Path = ".", *, base: str | None = None) -> list[FileChange]:
+    """Return local Git changes with rename/copy detection enabled."""
+
     root = resolve_repo(repo)
-    outputs: list[str] = []
+    changes: list[FileChange] = []
     if base:
-        diff = run_git(root, ("diff", "--name-only", base))
-        if diff:
-            outputs.extend(diff.splitlines())
+        changes.extend(
+            _parse_name_status(
+                run_git(root, ("diff", "--name-status", "--find-renames", base))
+            )
+        )
     else:
-        diff = run_git(root, ("diff", "--name-only", "HEAD"))
-        if diff:
-            outputs.extend(diff.splitlines())
-        cached = run_git(root, ("diff", "--cached", "--name-only"))
-        if cached:
-            outputs.extend(cached.splitlines())
+        changes.extend(
+            _parse_name_status(
+                run_git(root, ("diff", "--name-status", "--find-renames", "HEAD"))
+            )
+        )
+        changes.extend(
+            _parse_name_status(
+                run_git(
+                    root,
+                    ("diff", "--cached", "--name-status", "--find-renames"),
+                )
+            )
+        )
 
     status = run_git(root, ("status", "--short", "--untracked-files=all"))
-    if status:
-        outputs.extend(_status_path(line) for line in status.splitlines())
-
-    changed = {
-        path.replace("\\", "/")
-        for path in outputs
-        if path and not is_sensitive_path(path)
-    }
-    return sorted(changed)
+    changes.extend(_status_changes(status))
+    deduplicated: dict[tuple[str, str | None], FileChange] = {}
+    for change in changes:
+        if not change.path or is_sensitive_path(change.path):
+            continue
+        if change.previous_path and is_sensitive_path(change.previous_path):
+            continue
+        deduplicated[(change.path, change.previous_path)] = change
+    return sorted(
+        deduplicated.values(),
+        key=lambda item: (item.path, item.previous_path or ""),
+    )
