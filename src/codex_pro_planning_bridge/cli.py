@@ -119,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_option(approve_parser)
     approve_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
     approve_parser.add_argument("--approved-by", default="user")
+    approve_parser.add_argument(
+        "--expires-in",
+        type=int,
+        default=None,
+        help="approval validity window in seconds",
+    )
     approve_parser.add_argument("--revoke", action="store_true")
     approve_parser.add_argument("--reason", default="plan approval revoked")
     approve_parser.add_argument("--format", choices=("text", "json"), default="text")
@@ -419,13 +425,18 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "approve":
         approval = PlanApprovalStore(args.repo, plan=args.plan)
-        path = approval.revoke(args.reason) if args.revoke else approval.approve(args.approved_by)
+        path = (
+            approval.revoke(args.reason)
+            if args.revoke
+            else approval.approve(args.approved_by, expires_in=args.expires_in)
+        )
         payload = approval.status()
         if args.format == "json":
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             action = "revoked" if args.revoke else "recorded"
             print(f"Plan approval {action}: {path}")
+            print(f"Approval status: {payload['status']}")
             print(f"Effective approval: {payload['effective']}")
         return 0
 

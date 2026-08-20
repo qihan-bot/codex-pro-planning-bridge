@@ -63,7 +63,7 @@ class WorkflowSnapshotTests(unittest.TestCase):
             )
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["workflow"]["state"], "CONTEXT_READY")
-            self.assertEqual(payload["workflow"]["history_position"], 2)
+            self.assertEqual(payload["workflow"]["history_position"], 3)
             self.assertEqual(payload["plan"]["path"], ".codex/pro-plan/PLAN.md")
             self.assertEqual(
                 payload["plan"]["sha256"],

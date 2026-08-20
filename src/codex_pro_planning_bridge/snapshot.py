@@ -144,8 +144,7 @@ class SnapshotManager:
 
         approval = PlanApprovalStore(self.root, plan=plan_path)
         approval_record = approval.load()
-        binding = approval.binding_status()
-        approval_status = "APPROVED" if binding["effective"] else "UNAPPROVED"
+        approval_status = str(approval.status()["status"])
 
         repository_commit, repository_dirty = git_repository_state(
             self.root,
