@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .context import collect_repository
+from .context.exporters import export_context_json
 from .repository import (
     SUPPORTED_MANIFESTS,
     git_status,
@@ -24,6 +26,7 @@ def collect_context(repo: str | Path = ".", output_dir: str | Path | None = None
 
     root = resolve_repo(repo)
     destination = resolve_repo_path(root, output_dir) if output_dir is not None else root / ".codex" / "pro-plan"
+    machine_context = collect_repository(root)
     files = iter_project_files(root)
     paths = [relative for relative, _ in files]
     manifests = set(paths)
@@ -57,11 +60,13 @@ def collect_context(repo: str | Path = ".", output_dir: str | Path | None = None
             "See `repo-tree.txt` for the sanitized file list.",
         ]
     )
-    return {
+    outputs = {
         "tree": write_text(destination / "repo-tree.txt", "\n".join(paths) if paths else "(no project files found)"),
         "status": write_text(destination / "git-status.txt", git_status(root)),
         "context": write_text(destination / "project-context.md", context),
     }
+    outputs["json"] = export_context_json(machine_context, destination / "context.json")
+    return outputs
 
 
 def _default_template() -> Path:
