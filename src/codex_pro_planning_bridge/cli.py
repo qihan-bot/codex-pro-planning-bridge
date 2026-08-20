@@ -1,33 +1,31 @@
-"""Command-line interface for the planning bridge."""
+"""Unified command-line entry point for the planning bridge."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
+from typing import Any
 
 from . import __version__
+from .approval import PlanApprovalStore
+from .artifacts import DEFAULT_GOAL, build_prompt, collect_context
 from .context import collect_repository
-from .plan import validate_plan
-from .prompt import build_request
+from .diff import diff_plan, render_plan_diff
+from .handoff import open_chat
+from .loop import run_loop
+from .memory import ProjectMemory
+from .repository import resolve_repo, resolve_repo_path, write_text
+from .state import WorkflowStateStore
+from .validator import validate as validate_repository
+from .workflow import Workflow
 
 
 def _add_collection_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", default=".", help="repository directory (default: current directory)")
     parser.add_argument("--max-files", type=int, default=80, help="maximum files in the context")
-    parser.add_argument(
-        "--max-file-bytes",
-        type=int,
-        default=12_000,
-        help="maximum excerpt bytes per file",
-    )
-    parser.add_argument(
-        "--max-total-bytes",
-        type=int,
-        default=120_000,
-        help="maximum total excerpt bytes",
-    )
+    parser.add_argument("--max-file-bytes", type=int, default=12_000, help="maximum excerpt bytes per file")
+    parser.add_argument("--max-total-bytes", type=int, default=120_000, help="maximum total excerpt bytes")
     parser.add_argument(
         "--include-hidden",
         action="store_true",
@@ -35,35 +33,169 @@ def _add_collection_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_repo_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", default=".", help="repository directory (default: current directory)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-pro-planning-bridge",
-        description="Generate local-first architecture planning requests and validate plans.",
+        description="Local-first planning, validation, diff, and project-memory tools.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    collect_parser = subparsers.add_parser("collect", help="collect repository context")
+    collect_parser = subparsers.add_parser("collect", help="collect local planning artifacts")
     _add_collection_options(collect_parser)
-    collect_parser.add_argument("-o", "--output", default="CONTEXT.md", help="output Markdown path")
+    collect_parser.add_argument("--output-dir", default=None, help="artifact directory (default: .codex/pro-plan)")
+    collect_parser.add_argument("-o", "--output", default=None, help="also write bounded CONTEXT.md to this path")
 
-    request_parser = subparsers.add_parser("request", help="generate REQUEST.md for ChatGPT Pro")
+    init_parser = subparsers.add_parser("init", help="initialize context artifacts and project memory")
+    _add_collection_options(init_parser)
+    init_parser.add_argument("--output-dir", default=None, help="artifact directory (default: .codex/pro-plan)")
+
+    request_parser = subparsers.add_parser(
+        "prompt",
+        aliases=["request"],
+        help="collect context and generate REQUEST.md",
+    )
     _add_collection_options(request_parser)
-    request_parser.add_argument("--goal", required=True, help="the user request to plan")
-    request_parser.add_argument("-o", "--output", default="REQUEST.md", help="output Markdown path")
+    request_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
+    request_parser.add_argument("--template", default=None, help="planner template path")
+    request_parser.add_argument("--output-dir", default=None, help="artifact directory (default: .codex/pro-plan)")
+    request_parser.add_argument("-o", "--output", default=None, help="copy REQUEST.md to this path as well")
 
     handoff_parser = subparsers.add_parser("handoff", help="show the manual Pro handoff checklist")
-    handoff_parser.add_argument("--request", default="REQUEST.md", help="generated request path")
-    handoff_parser.add_argument("--plan", default="PLAN.md", help="expected plan path")
+    _add_repo_option(handoff_parser)
+    handoff_parser.add_argument("--request", default=".codex/pro-plan/REQUEST.md")
+    handoff_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
 
-    validate_parser = subparsers.add_parser("validate", help="validate a ChatGPT Pro plan")
-    validate_parser.add_argument("--plan", default="PLAN.md", help="plan Markdown path")
+    open_parser = subparsers.add_parser("open", help="copy REQUEST.md and open ChatGPT manually")
+    _add_repo_option(open_parser)
+    open_parser.add_argument("--request", default=".codex/pro-plan/REQUEST.md")
+    open_parser.add_argument("--url", default="https://chatgpt.com/")
+    open_parser.add_argument("--no-pause", action="store_true")
+
+    validate_parser = subparsers.add_parser("validate", help="validate PLAN.md against repository facts")
+    _add_repo_option(validate_parser)
+    validate_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    validate_parser.add_argument("--output", default=".codex/pro-plan/VALIDATION_REPORT.md")
     validate_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    diff_parser = subparsers.add_parser("diff", help="compare PLAN.md with local repository changes")
+    _add_repo_option(diff_parser)
+    diff_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    diff_parser.add_argument("--output", default=".codex/pro-plan/PLAN_DIFF.md")
+    diff_parser.add_argument("--base", default=None, help="Git commit/ref to compare against")
+    diff_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    loop_parser = subparsers.add_parser(
+        "loop",
+        help="advance the recoverable local planning workflow",
+    )
+    _add_repo_option(loop_parser)
+    loop_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
+    loop_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    loop_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
+    loop_parser.add_argument(
+        "--review",
+        action="store_true",
+        help="review local implementation drift and update project memory",
+    )
+    loop_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="start a new workflow while retaining local history",
+    )
+    loop_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    approve_parser = subparsers.add_parser(
+        "approve",
+        help="record or revoke explicit human approval for PLAN.md",
+    )
+    _add_repo_option(approve_parser)
+    approve_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    approve_parser.add_argument("--approved-by", default="user")
+    approve_parser.add_argument("--revoke", action="store_true")
+    approve_parser.add_argument("--reason", default="plan approval revoked")
+    approve_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="inspect the current workflow state without advancing it",
+    )
+    _add_repo_option(status_parser)
+    status_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    status_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="resume a paused or interrupted workflow",
+    )
+    _add_repo_option(resume_parser)
+    resume_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
+    resume_parser.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+    resume_parser.add_argument("--base", default=None, help="Git commit/ref for implementation review")
+    resume_parser.add_argument("--review", action="store_true")
+    resume_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    pause_parser = subparsers.add_parser("pause", help="pause the current workflow")
+    _add_repo_option(pause_parser)
+    pause_parser.add_argument("--reason", default="workflow paused by user")
+
+    cancel_parser = subparsers.add_parser("cancel", help="cancel the current workflow")
+    _add_repo_option(cancel_parser)
+    cancel_parser.add_argument("--reason", default="workflow cancelled by user")
+
+    history_parser = subparsers.add_parser(
+        "history",
+        help="show transition history and the append-only event log",
+    )
+    _add_repo_option(history_parser)
+    history_parser.add_argument("--format", choices=("text", "json"), default="text")
+
+    memory_parser = subparsers.add_parser("memory", help="manage persistent project memory")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_command", required=True)
+
+    memory_init = memory_subparsers.add_parser("init", help="create missing project-memory documents")
+    _add_repo_option(memory_init)
+    memory_init.add_argument("--overwrite", action="store_true", help="replace existing memory templates")
+
+    memory_show = memory_subparsers.add_parser("show", help="print project memory")
+    _add_repo_option(memory_show)
+    memory_show.add_argument("--document", default=None, help="one document name, such as decisions.md")
+
+    memory_list = memory_subparsers.add_parser("list", help="list ADR entries and memory metadata")
+    _add_repo_option(memory_list)
+
+    memory_migrate = memory_subparsers.add_parser(
+        "migrate",
+        help="apply local project-memory schema migrations",
+    )
+    _add_repo_option(memory_migrate)
+
+    memory_write = memory_subparsers.add_parser("write", help="write or append a memory document")
+    _add_repo_option(memory_write)
+    memory_write.add_argument("--document", required=True)
+    memory_write.add_argument("--content", required=True)
+    memory_write.add_argument("--append", action="store_true")
+
+    memory_record = memory_subparsers.add_parser("record-plan", help="record a PLAN.md summary as an ADR")
+    _add_repo_option(memory_record)
+    memory_record.add_argument("--plan", default=".codex/pro-plan/PLAN.md")
+
+    memory_adr = memory_subparsers.add_parser("adr-create", help="create a numbered architecture decision record")
+    _add_repo_option(memory_adr)
+    memory_adr.add_argument("--title", required=True)
+    memory_adr.add_argument("--status", default="Proposed")
+    content_group = memory_adr.add_mutually_exclusive_group()
+    content_group.add_argument("--content", default=None)
+    content_group.add_argument("--content-file", default=None)
 
     return parser
 
 
-def _collect_args(args: argparse.Namespace):
+def _collect_context_args(args: argparse.Namespace):
     return collect_repository(
         args.repo,
         max_files=args.max_files,
@@ -73,53 +205,251 @@ def _collect_args(args: argparse.Namespace):
     )
 
 
-def _write_text(path: str | Path, content: str) -> Path:
-    output = Path(path).expanduser()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(content, encoding="utf-8", newline="\n")
-    return output
+def _workflow_status(repo: str, plan: str) -> dict[str, Any]:
+    root = resolve_repo(repo)
+    store = WorkflowStateStore(root)
+    snapshot = store.load(default_plan=plan)
+    approval = PlanApprovalStore(root, plan=snapshot.plan or plan)
+    return {
+        "state": snapshot.state.value,
+        "goal": snapshot.goal,
+        "plan": str(snapshot.plan) if snapshot.plan else None,
+        "started": snapshot.started.isoformat(),
+        "updated": snapshot.updated.isoformat(),
+        "next_action": snapshot.next_action,
+        "error": snapshot.error,
+        "paused_from": snapshot.paused_from.value if snapshot.paused_from else None,
+        "approval": approval.status(),
+    }
+
+
+def _print_loop_result(loop_result, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(loop_result.to_dict(), indent=2, ensure_ascii=False))
+        return
+    print(f"Workflow state: {loop_result.state.value}")
+    for message in loop_result.messages:
+        print(f"- {message}")
+    print(f"Next action: {loop_result.next_action}")
+    for name, path in loop_result.artifacts.items():
+        print(f"- {name}: {path}")
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.command == "collect":
-        context = _collect_args(args)
-        output = _write_text(args.output, context.to_markdown())
-        print(f"Wrote {output} ({len(context.files)} files, {context.omitted_files} omitted).")
+    if args.command == "init":
+        artifacts = collect_context(args.repo, args.output_dir)
+        memory = ProjectMemory(args.repo)
+        memory.initialize()
+        print("Initialized:")
+        for path in artifacts.values():
+            print(f"- {path}")
+        print(f"- {memory.directory}")
         return 0
 
-    if args.command == "request":
-        context = _collect_args(args)
-        output = _write_text(args.output, build_request(context, args.goal))
-        print(
-            f"Wrote {output}. Review it locally, then paste it into ChatGPT Pro manually."
+    if args.command == "collect":
+        artifacts = collect_context(args.repo, args.output_dir)
+        print("Generated:")
+        for path in artifacts.values():
+            print(f"- {path}")
+        if args.output:
+            context = _collect_context_args(args)
+            output = resolve_repo_path(resolve_repo(args.repo), args.output)
+            write_text(output, context.to_markdown())
+            print(f"- {output}")
+        return 0
+
+    if args.command in {"prompt", "request"}:
+        artifacts = collect_context(args.repo, args.output_dir)
+        request_path = build_prompt(
+            args.repo,
+            user_request=args.user_request,
+            template=args.template,
+            output_dir=args.output_dir,
         )
+        if args.output:
+            root = resolve_repo(args.repo)
+            output = resolve_repo_path(root, args.output)
+            write_text(output, request_path.read_text(encoding="utf-8"))
+            request_path = output
+        print(f"Generated {request_path}")
+        print("Review REQUEST.md before copying it into ChatGPT Pro manually.")
         return 0
 
     if args.command == "handoff":
-        request_path = Path(args.request).expanduser()
+        root = resolve_repo(args.repo)
+        request_path = resolve_repo_path(root, args.request)
         if not request_path.is_file():
             print(f"Request file not found: {request_path}", file=sys.stderr)
             return 2
-        plan_path = Path(args.plan).expanduser()
-        print(f"Request ready: {request_path.resolve()}")
+        plan_path = resolve_repo_path(root, args.plan)
+        print(f"Request ready: {request_path}")
         print("\nManual handoff:")
         print("1. Open ChatGPT Pro in your browser.")
         print(f"2. Review and paste the contents of {request_path}.")
         print(f"3. Save the response as {plan_path}.")
-        print(f"4. Run: codex-pro-planning-bridge validate --plan {plan_path}")
+        print(f"4. Run: codex-pro-planning-bridge validate --repo {root} --plan {plan_path}")
         return 0
 
+    if args.command == "open":
+        return open_chat(
+            args.repo,
+            request=args.request,
+            url=args.url,
+            pause=not args.no_pause,
+        )
+
     if args.command == "validate":
-        plan_path = Path(args.plan).expanduser()
-        if not plan_path.is_file():
-            print(f"Plan file not found: {plan_path}", file=sys.stderr)
-            return 2
-        result = validate_plan(plan_path.read_text(encoding="utf-8"))
+        report_path, passed = validate_repository(args.repo, plan=args.plan, output=args.output)
+        if args.format == "json":
+            print(json.dumps({"report": str(report_path), "passed": passed}, indent=2))
+        else:
+            print(report_path.read_text(encoding="utf-8"))
+        return 0 if passed else 1
+
+    if args.command == "diff":
+        report_path, result = diff_plan(args.repo, plan=args.plan, output=args.output, base=args.base)
         if args.format == "json":
             print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
         else:
-            print(result.to_text())
+            print(render_plan_diff(result))
+            print(f"Wrote {report_path}")
         return 0 if result.ok else 1
+
+    if args.command == "approve":
+        approval = PlanApprovalStore(args.repo, plan=args.plan)
+        path = approval.revoke(args.reason) if args.revoke else approval.approve(args.approved_by)
+        payload = approval.status()
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            action = "revoked" if args.revoke else "recorded"
+            print(f"Plan approval {action}: {path}")
+            print(f"Effective approval: {payload['effective']}")
+        return 0
+
+    if args.command == "status":
+        payload = _workflow_status(args.repo, args.plan)
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Workflow state: {payload['state']}")
+            print(f"Goal: {payload['goal'] or '(none)'}")
+            print(f"Plan: {payload['plan'] or '(none)'}")
+            print(f"Approval effective: {payload['approval']['effective']}")
+            if payload["next_action"]:
+                print(f"Next action: {payload['next_action']}")
+            if payload["error"]:
+                print(f"Error: {payload['error']}")
+        return 0
+
+    if args.command == "history":
+        store = WorkflowStateStore(args.repo)
+        payload = {
+            "transitions": [item.to_dict() for item in store.history()],
+            "events": [item.to_dict() for item in store.events()],
+        }
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print("Transition history:")
+            for item in payload["transitions"]:
+                print(
+                    f"- {item['at']}: {item['from'] or '(none)'} -> {item['to']} "
+                    f"({item['reason']})"
+                )
+            print("Event log:")
+            for item in payload["events"]:
+                print(
+                    f"- {item['timestamp']}: {item['event']} "
+                    f"{item['from'] or '(none)'} -> {item['to']} "
+                    f"[{item['actor']}]"
+                )
+        return 0
+
+    if args.command == "pause":
+        snapshot = Workflow(args.repo).pause(args.reason)
+        print(f"Workflow paused from {snapshot.paused_from.value if snapshot.paused_from else 'unknown'}.")
+        return 0
+
+    if args.command == "cancel":
+        snapshot = Workflow(args.repo).cancel(args.reason)
+        print(f"Workflow cancelled in state {snapshot.state.value}.")
+        return 0
+
+    if args.command == "resume":
+        loop_result = run_loop(
+            args.repo,
+            goal=args.user_request,
+            plan=args.plan,
+            base=args.base,
+            review=args.review,
+            resume=True,
+        )
+        _print_loop_result(loop_result, args.format)
+        return 0 if loop_result.ok else 1
+
+    if args.command == "loop":
+        loop_result = run_loop(
+            args.repo,
+            goal=args.user_request,
+            plan=args.plan,
+            base=args.base,
+            review=args.review,
+            reset=args.reset,
+        )
+        _print_loop_result(loop_result, args.format)
+        return 0 if loop_result.ok else 1
+
+    if args.command == "memory":
+        memory = ProjectMemory(args.repo)
+        if args.memory_command == "init":
+            paths = memory.initialize(overwrite=args.overwrite)
+            if paths:
+                for path in paths:
+                    print(f"Created {path}")
+            else:
+                print(f"Project memory already initialized at {memory.directory}")
+            return 0
+        if args.memory_command == "show":
+            if args.document:
+                print(memory.document(args.document).content)
+            else:
+                print(memory.to_markdown())
+            return 0
+        if args.memory_command == "list":
+            metadata = memory.metadata()
+            print(f"Memory format version: {metadata.get('version', 'unknown')}")
+            print(f"ADR entries: {metadata.get('entries', len(memory.list_adrs()))}")
+            for entry in memory.list_adrs():
+                print(f"- {entry.key}: {entry.path.relative_to(memory.root).as_posix()}")
+            return 0
+        if args.memory_command == "migrate":
+            paths = memory.migrate()
+            if paths:
+                for path in paths:
+                    print(f"Created {path}")
+            else:
+                print(f"Project memory is already at the supported schema at {memory.directory}")
+            return 0
+        if args.memory_command == "write":
+            path = memory.write(args.document, args.content, append=args.append)
+            print(f"Updated {path}")
+            return 0
+        if args.memory_command == "record-plan":
+            print(f"Recorded {memory.record_plan(args.plan)}")
+            return 0
+        if args.memory_command == "adr-create":
+            memory.initialize()
+            content = args.content
+            if args.content_file:
+                content_path = resolve_repo_path(memory.root, args.content_file)
+                if not content_path.is_file():
+                    raise ValueError(f"ADR content file does not exist: {content_path}")
+                content = content_path.read_text(encoding="utf-8")
+            print(
+                f"Created {memory.create_adr(args.title, status=args.status, content=content)}"
+            )
+            return 0
 
     raise AssertionError(f"unknown command: {args.command}")
 
@@ -129,6 +459,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return _run(args)
-    except (OSError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

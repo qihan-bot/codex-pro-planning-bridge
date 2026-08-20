@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -30,7 +31,7 @@ class MvpScriptTests(unittest.TestCase):
             tree = outputs["tree"].read_text(encoding="utf-8")
             context = outputs["context"].read_text(encoding="utf-8")
 
-            self.assertEqual(set(outputs), {"tree", "status", "context"})
+            self.assertEqual(set(outputs), {"tree", "status", "context", "json"})
             self.assertIn("package.json", tree)
             self.assertIn("src/main.py", tree)
             self.assertNotIn("node_modules", tree)
@@ -41,6 +42,9 @@ class MvpScriptTests(unittest.TestCase):
             self.assertIn("pyproject.toml", context)
             self.assertIn("Cargo.toml", context)
             self.assertIn("go.mod", context)
+            context_json = json.loads(outputs["json"].read_text(encoding="utf-8"))
+            self.assertEqual(context_json["project_types"], ["python", "node", "rust", "go"])
+            self.assertIn("src/main.py", {item["path"] for item in context_json["files"]})
 
     def test_ignore_patterns_cover_required_directories_and_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

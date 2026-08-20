@@ -44,6 +44,8 @@ Features:
 
 # v0.2 Intelligent Planning Loop
 
+Status: Complete (`v0.2.0-beta`)
+
 Goal:
 
 Upgrade from a prompt generator into a planning validation system.
@@ -74,6 +76,8 @@ Output:
 
 ### 2. Repository Fact Checker
 
+Status: Complete
+
 Detect incorrect assumptions.
 
 Examples:
@@ -86,6 +90,8 @@ Examples:
 ---
 
 ### 3. Plan Diff Engine
+
+Status: Complete
 
 Compare planned implementation with actual repository changes.
 
@@ -105,6 +111,8 @@ Detect:
 ---
 
 ### 4. Project Memory
+
+Status: Complete
 
 Introduce persistent project knowledge.
 
@@ -131,32 +139,77 @@ Store:
 
 ---
 
-# v0.3 Autonomous Planning Assistance
+# v0.2.1 Architecture Hardening
+
+Status: Complete (`v0.2.1`)
 
 Goal:
 
-Make Codex proactively recommend planning.
+Stabilize the planning infrastructure before implementing the v0.3 Planning Loop.
 
 Features:
 
-- task complexity detection
-- automatic planning suggestions
-- architecture review loop
-- project memory retrieval
+- Shared typed models for context, plans, facts, memory, and drift reports
+- Layered Context Collector with scanner, detector, filters, and exporters
+- Machine-readable `.codex/pro-plan/context.json`
+- ADR-based Project Memory with versioned `memory.json`
+- Rename-aware Plan Diff and possible symbol matches in Validator reports
+- `cpb` bootstrap/prompt CLI aliases with compatibility wrappers
+- Reusable test fixtures, Ruff, mypy, compile checks, and GitHub Actions CI
+
+---
+
+# v0.3 Continuous Planning Loop
+
+Status: Complete (`0.3.0.dev0`)
+
+Goal:
+
+Make the planning bridge recoverable and continuously aligned with the local
+repository while preserving the explicit ChatGPT Pro/Codex boundary.
+
+Features:
+
+- persisted workflow state and transition history
+- local Python, JavaScript/TypeScript, and Rust symbol indexing
+- context-aware plan validation and file/symbol drift reports
+- resumable context → validation → implementation → review loop
+- memory schema migrations and automatic planning-record updates
 
 Workflow:
 
 ```
-User request
+Task
  ↓
-Complexity analysis
+Context Collection
  ↓
-Recommend Pro Planning
+ChatGPT Pro Planning
  ↓
-Generate plan
+Plan Validation
  ↓
-Execute
+Codex Implementation
+ ↓
+Drift Detection
+ ↓
+Memory Update
 ```
+
+---
+
+# v0.3.1 Planning Safety Layer
+
+Status: In progress (`0.3.1.dev0`)
+
+Features:
+
+- append-only workflow event audit log
+- explicit human approval records for `PLAN.md`
+- `cpb status`, `resume`, `pause`, `cancel`, and `history`
+- local symbol ownership, import, and call relationship graph
+- recovery and approval-flow tests
+
+Constraints remain local-first: no OpenAI API calls, API keys, browser
+automation, autonomous source modification, or bypassing human approval.
 
 ---
 

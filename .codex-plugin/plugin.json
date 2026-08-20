@@ -1,6 +1,6 @@
 {
   "name": "codex-pro-planning-bridge",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Bridge Codex with ChatGPT Pro for local-first architecture planning.",
   "author": {
     "name": "qihan-bot",
@@ -20,13 +20,16 @@
   "interface": {
     "displayName": "Pro Planning Bridge",
     "shortDescription": "Generate local-first architecture planning requests.",
-    "longDescription": "Collect bounded repository context locally, prepare a human-reviewed request for ChatGPT Pro, and validate the returned implementation plan.",
+    "longDescription": "Collect bounded repository context locally, prepare a human-reviewed request for ChatGPT Pro, validate the returned implementation plan, detect implementation drift, maintain ADR-based project memory, and expose machine-readable context for future planning loops.",
     "developerName": "qihan-bot",
     "category": "Developer Tools",
     "capabilities": [
       "Local repository analysis",
       "Architecture planning",
-      "Plan validation"
+      "Plan validation",
+      "Implementation drift detection",
+      "Project memory",
+      "Machine-readable context"
     ],
     "defaultPrompt": [
       "Create a planning request for this repository",
