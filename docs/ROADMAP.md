@@ -44,6 +44,8 @@ Features:
 
 # v0.2 Intelligent Planning Loop
 
+Status: Release candidate (`0.2.0rc1`)
+
 Goal:
 
 Upgrade from a prompt generator into a planning validation system.
@@ -74,6 +76,8 @@ Output:
 
 ### 2. Repository Fact Checker
 
+Status: Complete
+
 Detect incorrect assumptions.
 
 Examples:
@@ -86,6 +90,8 @@ Examples:
 ---
 
 ### 3. Plan Diff Engine
+
+Status: Complete
 
 Compare planned implementation with actual repository changes.
 
@@ -105,6 +111,8 @@ Detect:
 ---
 
 ### 4. Project Memory
+
+Status: Complete
 
 Introduce persistent project knowledge.
 

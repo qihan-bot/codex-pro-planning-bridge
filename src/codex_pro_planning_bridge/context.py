@@ -4,52 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import os
 from pathlib import Path
-import re
-import subprocess
-from typing import Iterable, Sequence
 
 from . import __version__
-
-
-DEFAULT_EXCLUDED_DIRS = {
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "vendor",
-    "dist",
-    "build",
-    "coverage",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".codex",
-}
-
-SENSITIVE_BASENAMES = {
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".env.development",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    "credentials.json",
-    "credentials.yml",
-    "credentials.yaml",
-    "service-account.json",
-}
-
-SENSITIVE_SUFFIXES = {".pem", ".p12", ".pfx", ".key", ".jks"}
-SENSITIVE_NAME_RE = re.compile(
-    r"(?:^|[-_.])(secret|secrets|credential|credentials|passwords?|tokens?)(?:[-_.]|$)",
-    re.IGNORECASE,
+from .repository import (
+    DEFAULT_EXCLUDED_DIRS,
+    SENSITIVE_BASENAMES,
+    SENSITIVE_NAME_RE,
+    SENSITIVE_SUFFIXES,
+    is_sensitive_path,
+    list_repository_paths,
+    run_git,
 )
 
 LANGUAGE_BY_SUFFIX = {
@@ -218,67 +183,6 @@ class RepositoryContext:
         return "\n".join(lines).rstrip() + "\n"
 
 
-def is_sensitive_path(path: str | Path) -> bool:
-    """Return whether a relative path looks like it may contain a secret."""
-
-    path_obj = Path(path)
-    basename = path_obj.name.lower()
-    if basename in {item.lower() for item in SENSITIVE_BASENAMES}:
-        return True
-    if path_obj.suffix.lower() in SENSITIVE_SUFFIXES:
-        return True
-    if any(part.lower() in {"secret", "secrets", "credentials", "private"} for part in path_obj.parts):
-        return True
-    return bool(SENSITIVE_NAME_RE.search(path_obj.stem))
-
-
-def _run_git(root: Path, args: Sequence[str]) -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
-
-
-def _git_file_paths(root: Path) -> list[str] | None:
-    output = _run_git(root, ["ls-files", "--cached", "--others", "--exclude-standard"])
-    if output is None:
-        return None
-    return [line.replace("\\", "/") for line in output.splitlines() if line.strip()]
-
-
-def _fallback_file_paths(root: Path, include_hidden: bool) -> list[str]:
-    paths: list[str] = []
-    for current, directories, filenames in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        directories[:] = sorted(
-            directory
-            for directory in directories
-            if directory not in DEFAULT_EXCLUDED_DIRS
-            and (include_hidden or not directory.startswith("."))
-        )
-        for filename in sorted(filenames):
-            if not include_hidden and filename.startswith(".") and not is_sensitive_path(filename):
-                continue
-            full_path = current_path / filename
-            try:
-                relative = full_path.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            paths.append(relative)
-    return paths
-
-
 def _language_for(path: str) -> str:
     name = Path(path).name
     if name == "Dockerfile":
@@ -313,13 +217,6 @@ def _read_excerpt(path: Path, max_bytes: int) -> tuple[str | None, bool]:
     return text.replace("\r\n", "\n"), truncated
 
 
-def _redact_status_line(line: str) -> str:
-    path_part = line[3:].strip() if len(line) >= 3 else line
-    if is_sensitive_path(path_part):
-        return line[:2] + " [sensitive path omitted]"
-    return line
-
-
 def collect_repository(
     root: str | Path = ".",
     *,
@@ -343,8 +240,7 @@ def collect_repository(
     if not root_path.is_dir():
         raise ValueError(f"repository path is not a directory: {root_path}")
 
-    git_paths = _git_file_paths(root_path)
-    file_paths = git_paths if git_paths else _fallback_file_paths(root_path, include_hidden)
+    file_paths = list_repository_paths(root_path, include_hidden=include_hidden) or []
     file_paths = sorted(set(file_paths), key=_priority)
 
     excluded_sensitive: list[str] = []
@@ -389,12 +285,15 @@ def collect_repository(
             )
         )
 
-    branch = _run_git(root_path, ["branch", "--show-current"])
+    branch = run_git(root_path, ["branch", "--show-current"])
     if branch == "":
-        branch = _run_git(root_path, ["rev-parse", "--short", "HEAD"])
-    status_output = _run_git(root_path, ["status", "--short", "--untracked-files=all"])
-    status = [_redact_status_line(line) for line in (status_output or "").splitlines()]
-    recent_output = _run_git(root_path, ["log", "-5", "--pretty=format:%h %s"])
+        branch = run_git(root_path, ["rev-parse", "--short", "HEAD"])
+    status_output = run_git(root_path, ["status", "--short", "--untracked-files=all"])
+    status = []
+    for line in (status_output or "").splitlines():
+        path_part = line[3:].strip() if len(line) >= 3 else line
+        status.append(line[:2] + " [sensitive path omitted]" if is_sensitive_path(path_part) else line)
+    recent_output = run_git(root_path, ["log", "-5", "--pretty=format:%h %s"])
     recent_commits = (recent_output or "").splitlines()
 
     return RepositoryContext(
