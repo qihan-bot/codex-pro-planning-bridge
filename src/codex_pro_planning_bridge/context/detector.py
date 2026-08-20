@@ -63,7 +63,7 @@ def _read_pyproject_dependencies(path: Path) -> list[str]:
         inline = re.search(r"dependencies\s*=\s*\[(.*?)\]", stripped)
         if inline:
             dependencies.extend(
-                re.findall(r"[\"']([A-Za-z0-9_.-]+)[\"']", inline.group(1))
+                re.findall(r"[\"']([A-Za-z0-9_.-]+)", inline.group(1))
             )
             in_dependencies = False
             continue

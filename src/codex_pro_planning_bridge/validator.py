@@ -148,9 +148,9 @@ def extract_module_references(markdown: str) -> list[str]:
             references.add(match.group(1))
     for line in markdown.splitlines():
         if re.match(r"^\s*(?:from|import)\s+", line):
-            match = import_pattern.search(line)
-            if match:
-                references.add(match.group(1))
+            line_match = import_pattern.search(line)
+            if line_match:
+                references.add(line_match.group(1))
     return sorted(references)
 
 

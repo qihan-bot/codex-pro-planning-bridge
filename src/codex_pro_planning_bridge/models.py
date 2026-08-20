@@ -254,12 +254,15 @@ class ProjectContext:
             lines.append("No text excerpts were selected.")
         else:
             for file_info in excerpt_files:
+                excerpt = file_info.excerpt
+                if excerpt is None:
+                    continue
                 lines.extend(
                     [
                         f"### `{file_info.path}`",
                         "",
                         f"~~~{file_info.language}",
-                        file_info.excerpt.rstrip(),
+                        excerpt.rstrip(),
                         "~~~",
                         "",
                     ]
