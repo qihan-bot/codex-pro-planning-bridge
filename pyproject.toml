@@ -15,6 +15,7 @@ dependencies = []
 
 [project.scripts]
 codex-pro-planning-bridge = "codex_pro_planning_bridge.cli:main"
+cpb = "codex_pro_planning_bridge.cli:main"
 
 [project.optional-dependencies]
 dev = [

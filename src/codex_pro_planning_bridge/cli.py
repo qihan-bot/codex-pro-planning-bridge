@@ -45,7 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--output-dir", default=None, help="artifact directory (default: .codex/pro-plan)")
     collect_parser.add_argument("-o", "--output", default=None, help="also write bounded CONTEXT.md to this path")
 
-    request_parser = subparsers.add_parser("request", help="collect context and generate REQUEST.md")
+    init_parser = subparsers.add_parser("init", help="initialize context artifacts and project memory")
+    _add_collection_options(init_parser)
+    init_parser.add_argument("--output-dir", default=None, help="artifact directory (default: .codex/pro-plan)")
+
+    request_parser = subparsers.add_parser(
+        "prompt",
+        aliases=["request"],
+        help="collect context and generate REQUEST.md",
+    )
     _add_collection_options(request_parser)
     request_parser.add_argument("--goal", "--request", dest="user_request", default=DEFAULT_GOAL)
     request_parser.add_argument("--template", default=None, help="planner template path")
@@ -122,6 +130,16 @@ def _collect_context_args(args: argparse.Namespace):
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "init":
+        artifacts = collect_context(args.repo, args.output_dir)
+        memory = ProjectMemory(args.repo)
+        memory.initialize()
+        print("Initialized:")
+        for path in artifacts.values():
+            print(f"- {path}")
+        print(f"- {memory.directory}")
+        return 0
+
     if args.command == "collect":
         artifacts = collect_context(args.repo, args.output_dir)
         print("Generated:")
@@ -134,7 +152,7 @@ def _run(args: argparse.Namespace) -> int:
             print(f"- {output}")
         return 0
 
-    if args.command == "request":
+    if args.command in {"prompt", "request"}:
         artifacts = collect_context(args.repo, args.output_dir)
         request_path = build_prompt(
             args.repo,

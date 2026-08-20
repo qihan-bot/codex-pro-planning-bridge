@@ -8,6 +8,20 @@ from codex_pro_planning_bridge.cli import main
 
 
 class UnifiedCliTests(unittest.TestCase):
+    def test_init_and_prompt_aliases_share_the_unified_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+            self.assertEqual(main(["init", "--repo", str(root)]), 0)
+            self.assertTrue((root / ".codex" / "pro-plan" / "context.json").is_file())
+            self.assertTrue((root / ".codex" / "project-memory" / "memory.json").is_file())
+            self.assertEqual(
+                main(["prompt", "--repo", str(root), "--goal", "Review the demo"]),
+                0,
+            )
+            self.assertTrue((root / ".codex" / "pro-plan" / "REQUEST.md").is_file())
+
     def test_collect_request_validate_and_diff_share_the_cli_entry_point(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
