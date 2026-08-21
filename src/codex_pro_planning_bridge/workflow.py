@@ -5,9 +5,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .approval import PlanApprovalStore
+from .approval import (
+    APPROVAL_STATUS_EXPIRED,
+    APPROVAL_STATUS_INVALIDATED,
+    PlanApprovalStore,
+)
 from .models import WorkflowState
-from .state import WorkflowSnapshot, WorkflowStateStore, WorkflowTransition
+from .state import (
+    IMPLEMENTATION_STATES,
+    WorkflowSnapshot,
+    WorkflowStateStore,
+    WorkflowTransition,
+)
 
 
 ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
@@ -89,6 +98,77 @@ class Workflow:
             return target in {self.snapshot.paused_from, WorkflowState.CANCELLED}
         return target in ALLOWED_TRANSITIONS.get(self.state, frozenset())
 
+    def _approval_failure(self) -> tuple[str, str]:
+        payload = self.approval.status()
+        status = str(payload.get("status") or "UNAPPROVED")
+        reason = str(payload.get("binding_reason") or "approval is not effective")
+        return status, reason
+
+    def _record_approval_block(self, *, target: WorkflowState | None = None) -> None:
+        """Record approval invalidation and prevent implementation continuation."""
+
+        status, binding_reason = self._approval_failure()
+        lifecycle_event = {
+            APPROVAL_STATUS_INVALIDATED: "APPROVAL_INVALIDATED",
+            APPROVAL_STATUS_EXPIRED: "APPROVAL_EXPIRED",
+        }.get(status)
+        reason = f"effective approval is {status}: {binding_reason}"
+        if self.state in IMPLEMENTATION_STATES:
+            blocked_from = self.state
+            self.transition(
+                WorkflowState.PAUSED,
+                reason=reason,
+                next_action="Re-approve the current PLAN.md before continuing implementation.",
+                error=reason,
+                event=lifecycle_event or "IMPLEMENTATION_BLOCKED",
+                actor="system",
+            )
+            if lifecycle_event:
+                self.store.record(
+                    WorkflowTransition(
+                        from_state=WorkflowState.PAUSED,
+                        to_state=WorkflowState.PAUSED,
+                        at=datetime.now(timezone.utc),
+                        reason=(
+                            f"implementation blocked after {lifecycle_event.lower()} "
+                            f"from {blocked_from.value}"
+                        ),
+                        event="IMPLEMENTATION_BLOCKED",
+                        actor="system",
+                    )
+                )
+            return
+        if self.state == WorkflowState.PAUSED and target in IMPLEMENTATION_STATES:
+            if lifecycle_event:
+                self.store.record(
+                    WorkflowTransition(
+                        from_state=WorkflowState.PAUSED,
+                        to_state=WorkflowState.PAUSED,
+                        at=datetime.now(timezone.utc),
+                        reason=reason,
+                        event=lifecycle_event,
+                        actor="system",
+                    )
+                )
+            self.store.record(
+                WorkflowTransition(
+                    from_state=WorkflowState.PAUSED,
+                    to_state=WorkflowState.PAUSED,
+                    at=datetime.now(timezone.utc),
+                    reason=reason,
+                    event="IMPLEMENTATION_BLOCKED",
+                    actor="system",
+                )
+            )
+
+    def ensure_effective_approval(self) -> bool:
+        """Enforce approval as a continuous invariant for implementation states."""
+
+        if self.state not in IMPLEMENTATION_STATES or self.approval.is_approved():
+            return True
+        self._record_approval_block()
+        return False
+
     def transition(
         self,
         target: WorkflowState,
@@ -103,6 +183,14 @@ class Workflow:
 
         if not reason.strip():
             raise ValueError("workflow transition reason must not be empty")
+        if self.state in IMPLEMENTATION_STATES and target not in {
+            WorkflowState.PAUSED,
+            WorkflowState.FAILED,
+            WorkflowState.CANCELLED,
+        } and not self.ensure_effective_approval():
+            raise ValueError(
+                "implementation is blocked until PLAN.md has effective human approval"
+            )
         if target == WorkflowState.IMPLEMENTING and not self.approval.is_approved():
             raise ValueError(
                 "implementation requires explicit approval in .codex/pro-plan/APPROVAL.json"
@@ -121,8 +209,8 @@ class Workflow:
             error=error,
             paused_from=paused_from,
         )
-        self.store.save(updated)
-        self.store.record(
+        self.store.commit(
+            updated,
             WorkflowTransition(
                 from_state=self.snapshot.state,
                 to_state=target,
@@ -158,6 +246,7 @@ class Workflow:
             updated=datetime.now(timezone.utc),
             next_action=next_action,
             error=error,
+            paused_from=self.snapshot.paused_from,
         )
         self.store.save(updated)
         self.snapshot = updated
@@ -198,6 +287,11 @@ class Workflow:
         if self.state != WorkflowState.PAUSED or self.snapshot.paused_from is None:
             raise ValueError(f"workflow is not paused: {self.state.value}")
         target = self.snapshot.paused_from
+        if target in IMPLEMENTATION_STATES and not self.approval.is_approved():
+            self._record_approval_block(target=target)
+            raise ValueError(
+                "cannot resume implementation without effective PLAN.md approval"
+            )
         return self.transition(
             target,
             reason=reason,

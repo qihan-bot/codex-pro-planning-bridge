@@ -236,7 +236,7 @@ automation, autonomous source modification, or bypassing human approval.
 
 # v0.3.3 Reliability Layer
 
-Status: Beta (`v0.3.3-beta`)
+Status: Beta.1 (`v0.3.3-beta.1`)
 
 Goal:
 
@@ -255,6 +255,17 @@ Features:
 - approval lifecycle statuses: `APPROVED`, `INVALIDATED`, `EXPIRED`, and
   `REVOKED`, with optional local expiry and explicit revocation events; and
 - automatic snapshot baselines after `cpb pause`.
+
+Beta.1 reliability hardening adds:
+
+- a continuous approval invariant across implementation, resume, rollback, and
+  recovery paths;
+- post-operation runtime snapshots that establish a new integrity baseline;
+- atomic persistence for state, history, and the append-only event ledger;
+- strict event-ledger parsing that rejects malformed or truncated records;
+- repository commit/dirty-state checks during recovery; and
+- schema, identity, and cross-file validation for numbered snapshots and
+  `latest.json`.
 
 The release remains local-first: no OpenAI API calls, API keys, browser
 automation, autonomous source modification, or bypassing human approval.

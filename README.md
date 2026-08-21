@@ -1,6 +1,6 @@
 # Codex Pro Planning Bridge
 
-Release status: **v0.3.3 Reliability Layer** (`v0.3.3-beta`).
+Release status: **v0.3.3 Reliability Layer** (`v0.3.3-beta.1`).
 
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
@@ -11,9 +11,12 @@ v0.3 turns those components into a recoverable planning loop. The published
 gate before implementation, workflow recovery commands, and a local symbol
 relationship graph. v0.3.2 hardens that boundary with approval hash binding,
 read-only event queries, auditable workflow rollback, and broader graph tests.
-`v0.3.3-beta` completes the reliability layer with versioned runtime snapshots,
-fail-closed recovery, pre-resume integrity checks, and an explicit approval
-lifecycle. Workflow state and transition history remain persisted locally, and
+`v0.3.3-beta.1` completes the reliability layer with versioned runtime
+snapshots, fail-closed recovery, pre-resume integrity checks, and an explicit
+approval lifecycle. The beta.1 hardening pass adds continuous approval
+invariants, post-recovery runtime baselines, atomic state/history/event writes,
+strict event-ledger parsing, repository drift checks, and snapshot schema
+validation. Workflow state and transition history remain persisted locally, and
 the bridge pauses at the explicit Codex implementation boundary. It still has
 no OpenAI API integration, browser scraping, API key configuration, or
 autonomous source-code modification.
@@ -204,6 +207,14 @@ Git commit/dirty state, and Project Memory metadata. A failed check prints an
 actionable diagnostic and blocks resume. `cpb pause` creates a runtime
 snapshot baseline automatically so a paused workflow has a recoverable context.
 
+The `v0.3.3-beta.1` reliability hotfix also keeps the implementation boundary
+safe after state changes: revoking, expiring, or editing an approval pauses an
+active implementation workflow, and resume/rollback/recovery cannot restore an
+implementation state without a current matching approval. Runtime artifacts
+are written atomically, malformed or truncated event records fail closed, and
+successful resume/recovery/approval/rollback operations create a fresh
+integrity baseline.
+
 Approval records expose `APPROVED`, `INVALIDATED`, `EXPIRED`, and `REVOKED`
 statuses. Editing the plan invalidates its hash binding, `--expires-in` creates
 a local validity window, and `--revoke` records an explicit revocation. Only
@@ -309,7 +320,7 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] v0.3 Planning Loop
 - [x] v0.3.1 Planning Safety Layer (`v0.3.1-beta`)
 - [x] v0.3.2 Hardening (`v0.3.2`)
-- [x] v0.3.3 Reliability Layer (`v0.3.3-beta`)
+- [x] v0.3.3 Reliability Layer (`v0.3.3-beta.1`)
 
 ## License
 

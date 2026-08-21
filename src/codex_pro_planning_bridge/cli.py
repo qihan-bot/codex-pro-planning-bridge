@@ -431,6 +431,8 @@ def _run(args: argparse.Namespace) -> int:
             else approval.approve(args.approved_by, expires_in=args.expires_in)
         )
         payload = approval.status()
+        runtime_snapshot = SnapshotManager(args.repo, plan=args.plan).create()
+        payload["runtime_snapshot"] = str(runtime_snapshot.path)
         if args.format == "json":
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
@@ -438,6 +440,7 @@ def _run(args: argparse.Namespace) -> int:
             print(f"Plan approval {action}: {path}")
             print(f"Approval status: {payload['status']}")
             print(f"Effective approval: {payload['effective']}")
+            print(f"Runtime snapshot: {runtime_snapshot.path}")
         return 0
 
     if args.command == "status":
@@ -495,10 +498,12 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "rollback":
         snapshot = Workflow(args.repo).rollback(args.event_index, args.reason)
+        runtime_snapshot = SnapshotManager(args.repo, plan=snapshot.plan or ".codex/pro-plan/PLAN.md").create()
         payload = {
             "state": snapshot.state.value,
             "event_index": args.event_index,
             "next_action": snapshot.next_action,
+            "runtime_snapshot": str(runtime_snapshot.path),
         }
         if args.format == "json":
             print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -508,6 +513,7 @@ def _run(args: argparse.Namespace) -> int:
                 f"{snapshot.state.value}"
             )
             print(f"Next action: {snapshot.next_action}")
+            print(f"Runtime snapshot: {runtime_snapshot.path}")
         return 0
 
     if args.command == "recover":
@@ -625,6 +631,8 @@ def _run(args: argparse.Namespace) -> int:
             review=args.review,
             resume=True,
         )
+        runtime_snapshot = SnapshotManager(args.repo, plan=args.plan).create()
+        resume_result.artifacts["snapshot"] = runtime_snapshot.path
         if args.format == "json":
             resume_payload = resume_result.to_dict()
             resume_payload["integrity"] = integrity_report.to_dict()
@@ -643,6 +651,8 @@ def _run(args: argparse.Namespace) -> int:
             review=args.review,
             reset=args.reset,
         )
+        runtime_snapshot = SnapshotManager(args.repo, plan=args.plan).create()
+        loop_result.artifacts["snapshot"] = runtime_snapshot.path
         _print_loop_result(loop_result, args.format)
         return 0 if loop_result.ok else 1
 

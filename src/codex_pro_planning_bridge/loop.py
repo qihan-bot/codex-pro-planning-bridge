@@ -45,12 +45,13 @@ class LoopResult:
     drift: DriftReport | None = None
     context: ProjectContext | None = None
     plan: Plan | None = None
+    blocked: bool = False
 
     @property
     def ok(self) -> bool:
         return self.state != WorkflowState.FAILED and (
             self.validation is None or self.validation.passed
-        ) and (self.drift is None or not self.drift.missing and not self.drift.changed and not self.drift.blocked and not self.drift.unplanned_changes)
+        ) and (self.drift is None or not self.drift.missing and not self.drift.changed and not self.drift.blocked and not self.drift.unplanned_changes) and not self.blocked
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +71,7 @@ class LoopResult:
             }
             if self.plan
             else None,
+            "blocked": self.blocked,
         }
 
 
@@ -190,6 +192,7 @@ class PlanningLoop:
         messages: list[str] | None = None,
         validation: ValidationReport | None = None,
         drift: DriftReport | None = None,
+        blocked: bool = False,
     ) -> LoopResult:
         return LoopResult(
             state=self.state,
@@ -200,6 +203,17 @@ class PlanningLoop:
             drift=drift,
             context=self.context,
             plan=self.plan_model,
+            blocked=blocked,
+        )
+
+    def _approval_block_result(self) -> LoopResult:
+        return self._result(
+            "Re-approve PLAN.md before continuing implementation.",
+            messages=[
+                "Implementation was blocked because the current PLAN.md approval is no longer effective.",
+                "The workflow was paused and the approval transition was recorded in the event ledger.",
+            ],
+            blocked=True,
         )
 
     def prepare_context(self) -> LoopResult:
@@ -341,6 +355,9 @@ class PlanningLoop:
     def review(self) -> LoopResult:
         """Compare implementation drift, update memory, and complete the loop."""
 
+        if self.state in {WorkflowState.IMPLEMENTING, WorkflowState.REVIEWING}:
+            if not self.workflow.ensure_effective_approval():
+                return self._approval_block_result()
         if self.state == WorkflowState.IMPLEMENTING:
             self.workflow.transition(
                 WorkflowState.REVIEWING,
@@ -399,7 +416,21 @@ class PlanningLoop:
                     "Run cpb resume to continue the paused workflow.",
                     messages=["Workflow is paused; no work was performed."],
                 )
-            self.workflow.resume()
+            try:
+                self.workflow.resume()
+            except ValueError:
+                if (
+                    self.workflow.snapshot.paused_from in {
+                        WorkflowState.IMPLEMENTING,
+                        WorkflowState.REVIEWING,
+                    }
+                    and not self.approval.is_approved()
+                ):
+                    return self._approval_block_result()
+                raise
+        if self.state in {WorkflowState.IMPLEMENTING, WorkflowState.REVIEWING}:
+            if not self.workflow.ensure_effective_approval():
+                return self._approval_block_result()
         if self.state == WorkflowState.CANCELLED:
             return self._result(
                 "Start a new workflow with cpb loop --reset when ready.",
