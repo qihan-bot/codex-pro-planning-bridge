@@ -8,21 +8,25 @@ or transition the workflow and it never edits source or planning artifacts.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from .approval import PlanApprovalStore, plan_digest
 from .memory import MEMORY_METADATA_FILE, ProjectMemory
 from .repository import (
+    atomic_write_text,
+    create_immutable_text,
     resolve_repo,
     resolve_repo_path,
     git_repository_state,
-    write_text,
 )
+from .models import WorkflowState
 from .state import WorkflowSnapshot, WorkflowStateStore
 
 
@@ -31,6 +35,18 @@ SNAPSHOT_SCHEMA_VERSION = 1
 LATEST_SNAPSHOT_FILE = "latest.json"
 DEFAULT_PLAN = Path(".codex/pro-plan/PLAN.md")
 _SNAPSHOT_NAME_RE = re.compile(r"^(?P<snapshot_id>[0-9]+)\.json$")
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_SNAPSHOT_STATUSES = {"APPROVED", "INVALIDATED", "EXPIRED", "REVOKED", "UNAPPROVED"}
+_SNAPSHOT_FIELDS = {
+    "schema_version",
+    "snapshot_id",
+    "timestamp",
+    "workflow",
+    "plan",
+    "approval",
+    "repository",
+    "memory",
+}
 
 
 def _timestamp(value: datetime | None = None) -> str:
@@ -110,7 +126,140 @@ class SnapshotManager:
 
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
-    def _load_payload(self, path: Path) -> dict[str, Any]:
+    def _numbered_paths(self) -> list[tuple[int, Path]]:
+        paths: list[tuple[int, Path]] = []
+        if not self.directory.is_dir():
+            return paths
+        for path in self.directory.glob("*.json"):
+            match = _SNAPSHOT_NAME_RE.fullmatch(path.name)
+            if match:
+                snapshot_id = int(match.group("snapshot_id"))
+                if snapshot_id > 0:
+                    paths.append((snapshot_id, path))
+        return sorted(paths)
+
+    @staticmethod
+    def _validate_timestamp(value: object, label: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"snapshot {label} must be an ISO-8601 timestamp")
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"snapshot {label} must be an ISO-8601 timestamp") from error
+
+    def _validate_payload(self, path: Path, value: dict[str, Any]) -> dict[str, Any]:
+        missing = sorted(_SNAPSHOT_FIELDS.difference(value))
+        unknown = sorted(set(value).difference(_SNAPSHOT_FIELDS))
+        if missing or unknown:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unknown:
+                details.append("unknown " + ", ".join(unknown))
+            raise ValueError(f"workflow snapshot schema mismatch: {'; '.join(details)}: {path}")
+        schema_version = value["schema_version"]
+        snapshot_id = value["snapshot_id"]
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != SNAPSHOT_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                f"workflow snapshot schema {schema_version!r} is not supported: {path}"
+            )
+        if isinstance(snapshot_id, bool) or not isinstance(snapshot_id, int) or snapshot_id < 1:
+            raise ValueError(f"workflow snapshot id must be positive: {path}")
+        if path.name != LATEST_SNAPSHOT_FILE:
+            match = _SNAPSHOT_NAME_RE.fullmatch(path.name)
+            if match is None or int(match.group("snapshot_id")) != snapshot_id:
+                raise ValueError(
+                    f"workflow snapshot filename does not match payload id {snapshot_id}: {path}"
+                )
+        self._validate_timestamp(value["timestamp"], "timestamp")
+
+        workflow = value["workflow"]
+        plan = value["plan"]
+        approval = value["approval"]
+        repository = value["repository"]
+        memory = value["memory"]
+        section_specs = (
+            (
+                "workflow",
+                workflow,
+                {"state", "history_position", "goal", "started", "updated", "next_action", "paused_from"},
+            ),
+            ("plan", plan, {"path", "sha256"}),
+            (
+                "approval",
+                approval,
+                {"status", "plan_sha256", "approved_by", "timestamp"},
+            ),
+            ("repository", repository, {"commit", "dirty"}),
+            ("memory", memory, {"version", "schema_version"}),
+        )
+        for label, section, fields in section_specs:
+            if not isinstance(section, dict):
+                raise ValueError(f"workflow snapshot {label} section must be an object: {path}")
+            section_missing = sorted(fields.difference(section))
+            allowed_fields = fields | ({"expires_at"} if label == "approval" else set())
+            section_unknown = sorted(set(section).difference(allowed_fields))
+            if section_missing or section_unknown:
+                raise ValueError(
+                    f"workflow snapshot {label} section has invalid fields: {path}"
+                )
+
+        try:
+            WorkflowState(workflow["state"])
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"workflow snapshot state is invalid: {path}") from error
+        history_position = workflow["history_position"]
+        if (
+            isinstance(history_position, bool)
+            or not isinstance(history_position, int)
+            or history_position < 0
+        ):
+            raise ValueError(f"workflow snapshot history position is invalid: {path}")
+        if not isinstance(workflow["goal"], str):
+            raise ValueError(f"workflow snapshot goal is invalid: {path}")
+        for label in ("started", "updated"):
+            self._validate_timestamp(workflow[label], f"workflow.{label}")
+        if workflow["next_action"] is not None and not isinstance(workflow["next_action"], str):
+            raise ValueError(f"workflow snapshot next_action is invalid: {path}")
+        if workflow["paused_from"] is not None:
+            try:
+                WorkflowState(workflow["paused_from"])
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"workflow snapshot paused_from is invalid: {path}") from error
+
+        if plan["path"] is not None and not isinstance(plan["path"], str):
+            raise ValueError(f"workflow snapshot PLAN path is invalid: {path}")
+        if plan["sha256"] is not None and (
+            not isinstance(plan["sha256"], str) or not _SHA256_RE.fullmatch(plan["sha256"])
+        ):
+            raise ValueError(f"workflow snapshot PLAN SHA-256 is malformed: {path}")
+        if approval["status"] not in _SNAPSHOT_STATUSES:
+            raise ValueError(f"workflow snapshot approval status is invalid: {path}")
+        for key in ("plan_sha256",):
+            if approval[key] is not None and (
+                not isinstance(approval[key], str) or not _SHA256_RE.fullmatch(approval[key])
+            ):
+                raise ValueError(f"workflow snapshot approval {key} is malformed: {path}")
+        if approval["approved_by"] is not None and not isinstance(approval["approved_by"], str):
+            raise ValueError(f"workflow snapshot approval approver is invalid: {path}")
+        for key in ("timestamp", "expires_at"):
+            if approval.get(key) is not None:
+                self._validate_timestamp(approval[key], f"approval.{key}")
+        if repository["commit"] is not None and not isinstance(repository["commit"], str):
+            raise ValueError(f"workflow snapshot repository commit is invalid: {path}")
+        if repository["dirty"] is not None and not isinstance(repository["dirty"], bool):
+            raise ValueError(f"workflow snapshot repository dirty flag is invalid: {path}")
+        if memory["version"] is not None and not isinstance(memory["version"], (str, int, float)):
+            raise ValueError(f"workflow snapshot memory version is invalid: {path}")
+        if memory["schema_version"] is not None and not isinstance(memory["schema_version"], int):
+            raise ValueError(f"workflow snapshot memory schema version is invalid: {path}")
+        return value
+
+    def _load_payload(self, path: Path, *, validate_latest: bool = True) -> dict[str, Any]:
         if not path.is_file():
             raise ValueError(f"workflow snapshot does not exist: {path}")
         try:
@@ -119,18 +268,17 @@ class SnapshotManager:
             raise ValueError(f"invalid workflow snapshot JSON: {path}: {error}") from error
         if not isinstance(value, dict):
             raise ValueError(f"workflow snapshot must be a JSON object: {path}")
-        try:
-            schema_version = int(value["schema_version"])
-            snapshot_id = int(value["snapshot_id"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError(f"workflow snapshot is missing its version or id: {path}") from error
-        if schema_version != SNAPSHOT_SCHEMA_VERSION:
-            raise ValueError(
-                f"workflow snapshot schema {schema_version} is not supported; "
-                f"expected {SNAPSHOT_SCHEMA_VERSION}: {path}"
-            )
-        if snapshot_id < 1:
-            raise ValueError(f"workflow snapshot id must be positive: {path}")
+        value = self._validate_payload(path, value)
+        if validate_latest and path.name == LATEST_SNAPSHOT_FILE:
+            numbered = self._numbered_paths()
+            if not numbered:
+                raise ValueError(f"latest workflow snapshot has no numbered snapshot: {path}")
+            _, newest_path = numbered[-1]
+            newest = self._load_payload(newest_path, validate_latest=False)
+            if value != newest:
+                raise ValueError(
+                    f"latest workflow snapshot does not match newest numbered snapshot: {path}"
+                )
         return value
 
     def _selected_runtime(self) -> tuple[WorkflowSnapshot, Path]:
@@ -157,6 +305,9 @@ class SnapshotManager:
         approval_timestamp = (
             approval_record.timestamp.isoformat() if approval_record.timestamp else None
         )
+        approval_expires_at = (
+            approval_record.expires_at.isoformat() if approval_record.expires_at else None
+        )
 
         return {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -182,6 +333,7 @@ class SnapshotManager:
                 "plan_sha256": approval_record.plan_sha256,
                 "approved_by": approval_record.approved_by,
                 "timestamp": approval_timestamp,
+                "expires_at": approval_expires_at,
             },
             "repository": {
                 "commit": repository_commit,
@@ -193,12 +345,49 @@ class SnapshotManager:
     def create(self) -> SnapshotRecord:
         """Create the next immutable snapshot and refresh latest.json."""
 
-        snapshot_id = self._next_snapshot_id()
-        payload = self._build_payload(snapshot_id)
-        serialized = self._serialize(payload)
-        numbered_path = write_text(self._numbered_path(snapshot_id), serialized)
-        write_text(self.directory / LATEST_SNAPSHOT_FILE, serialized)
-        return SnapshotRecord(path=numbered_path, payload=payload)
+        with self._creation_lock():
+            while True:
+                snapshot_id = self._next_snapshot_id()
+                payload = self._build_payload(snapshot_id)
+                serialized = self._serialize(payload)
+                numbered_path = self._numbered_path(snapshot_id)
+                try:
+                    create_immutable_text(numbered_path, serialized)
+                except FileExistsError:
+                    continue
+                try:
+                    atomic_write_text(self.directory / LATEST_SNAPSHOT_FILE, serialized)
+                except Exception:
+                    # The numbered record belongs to this failed create call;
+                    # remove it so latest.json cannot point at a half-published
+                    # snapshot and a retry can safely reuse the ID.
+                    try:
+                        numbered_path.unlink()
+                    except OSError:
+                        pass
+                    raise
+                return SnapshotRecord(path=numbered_path, payload=payload)
+
+    @contextmanager
+    def _creation_lock(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        lock_path = self.directory / ".create.lock"
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                lock_path.mkdir()
+                break
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("timed out waiting for workflow snapshot creation lock")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                lock_path.rmdir()
+            except OSError:
+                pass
 
     def list_snapshots(self) -> list[SnapshotRecord]:
         """Return numbered snapshots in ascending creation order."""
@@ -206,14 +395,7 @@ class SnapshotManager:
         records: list[SnapshotRecord] = []
         if not self.directory.is_dir():
             return records
-        paths: list[tuple[int, Path]] = []
-        for path in self.directory.glob("*.json"):
-            match = _SNAPSHOT_NAME_RE.fullmatch(path.name)
-            if match:
-                snapshot_id = int(match.group("snapshot_id"))
-                if snapshot_id > 0:
-                    paths.append((snapshot_id, path))
-        for _, path in sorted(paths):
+        for _, path in self._numbered_paths():
             records.append(SnapshotRecord(path=path, payload=self._load_payload(path)))
         return records
 

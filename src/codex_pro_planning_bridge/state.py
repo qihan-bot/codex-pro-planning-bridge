@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from .models import WorkflowState
-from .repository import resolve_repo, resolve_repo_path, write_text
+from .repository import (
+    append_jsonl_event,
+    atomic_write_bytes,
+    atomic_write_json,
+    resolve_repo,
+    resolve_repo_path,
+    write_text,
+)
 
 
 WORKFLOW_DIRECTORY = Path(".codex/workflow")
@@ -23,6 +30,9 @@ HISTORY_FILE = WORKFLOW_DIRECTORY / "history.json"
 EVENTS_FILE = WORKFLOW_DIRECTORY / "events.jsonl"
 WORKFLOW_SCHEMA_VERSION = 1
 EVENT_SCHEMA_VERSION = 1
+IMPLEMENTATION_STATES = frozenset(
+    {WorkflowState.IMPLEMENTING, WorkflowState.REVIEWING}
+)
 
 
 def _now() -> datetime:
@@ -37,6 +47,16 @@ def _parse_datetime(value: object, fallback: datetime | None = None) -> datetime
         except ValueError:
             pass
     return fallback or _now()
+
+
+def _parse_datetime_strict(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from error
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _state_value(value: object) -> WorkflowState:
@@ -82,6 +102,8 @@ class WorkflowTransition:
             "to": self.to_state.value,
             "at": self.at.isoformat(),
             "reason": self.reason,
+            "event": self.event,
+            "actor": self.actor,
         }
 
     def to_event(self) -> "WorkflowEvent":
@@ -242,8 +264,8 @@ class WorkflowStateStore:
         snapshot = self.load(default_goal=goal, default_plan=plan)
         if self.state_path.is_file():
             return snapshot
-        self.save(snapshot)
-        self.record(
+        self.commit(
+            snapshot,
             WorkflowTransition(
                 from_state=None,
                 to_state=snapshot.state,
@@ -255,19 +277,15 @@ class WorkflowStateStore:
         return snapshot
 
     def history(self, *, migrate: bool = True) -> list[WorkflowTransition]:
-        """Return the transition history, accepting the pre-v0.3 list shape."""
+        """Return strict transition history, accepting the pre-v0.3 list shape."""
 
         raw = self._read_json(self.history_path, {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": []})
         if isinstance(raw, list):
             events = raw
             if migrate:
-                write_text(
+                atomic_write_json(
                     self.history_path,
-                    json.dumps(
-                        {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
+                    {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
                 )
         elif isinstance(raw, dict):
             history_version = int(raw.get("schema_version", 0))
@@ -278,83 +296,186 @@ class WorkflowStateStore:
                 )
             events = raw.get("events", [])
         else:
-            events = []
+            raise ValueError(f"workflow history must be a JSON object: {self.history_path}")
+        if not isinstance(events, list):
+            raise ValueError(f"workflow history events must be a list: {self.history_path}")
         result: list[WorkflowTransition] = []
-        for item in events:
+        for position, item in enumerate(events, start=1):
             if not isinstance(item, dict):
-                continue
-            try:
-                from_value = item.get("from", item.get("from_state"))
-                result.append(
-                    WorkflowTransition(
-                        from_state=_state_value(from_value) if from_value else None,
-                        to_state=_state_value(item.get("to", item.get("to_state"))),
-                        at=_parse_datetime(item.get("at", item.get("timestamp"))),
-                        reason=str(item.get("reason", "")),
-                    )
+                raise ValueError(
+                    f"invalid workflow history entry at position {position}: expected object"
                 )
-            except ValueError:
-                continue
+            from_value = item.get("from", item.get("from_state"))
+            to_value = item.get("to", item.get("to_state"))
+            if "to" not in item and "to_state" not in item:
+                raise ValueError(f"workflow history entry {position} is missing 'to'")
+            reason = item.get("reason", "")
+            if not isinstance(reason, str):
+                raise ValueError(f"workflow history entry {position} has an invalid reason")
+            event = item.get("event", "STATE_TRANSITION")
+            actor = item.get("actor", "codex")
+            if not isinstance(event, str) or not event.strip():
+                raise ValueError(f"workflow history entry {position} has an invalid event")
+            if not isinstance(actor, str) or not actor.strip():
+                raise ValueError(f"workflow history entry {position} has an invalid actor")
+            try:
+                to_state = _state_value(to_value)
+                from_state = _state_value(from_value) if from_value else None
+            except ValueError as error:
+                raise ValueError(
+                    f"invalid workflow history entry at position {position}: {error}"
+                ) from error
+            timestamp_value = item.get("at", item.get("timestamp"))
+            result.append(
+                WorkflowTransition(
+                    from_state=from_state,
+                    to_state=to_state,
+                    at=_parse_datetime_strict(timestamp_value, f"history entry {position} at"),
+                    reason=reason,
+                    event=event,
+                    actor=actor,
+                )
+            )
         return result
 
-    def record(self, transition: WorkflowTransition) -> Path:
-        """Append one transition to both the readable history and JSONL audit log."""
-
+    def _history_payload(self, transition: WorkflowTransition) -> dict[str, object]:
         events = [item.to_dict() for item in self.history()]
         events.append(transition.to_dict())
-        history_path = write_text(
-            self.history_path,
-            json.dumps(
-                {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events},
-                indent=2,
-                ensure_ascii=False,
-            ),
-        )
-        self._append_event(transition.to_event())
-        return history_path
+        return {"schema_version": WORKFLOW_SCHEMA_VERSION, "events": events}
+
+    def _file_bytes(self, path: Path) -> bytes | None:
+        return path.read_bytes() if path.is_file() else None
+
+    def _restore_file(self, path: Path, content: bytes | None) -> None:
+        if content is None:
+            if path.exists():
+                path.unlink()
+            return
+        atomic_write_bytes(path, content)
+
+    def _append_history(self, transition: WorkflowTransition) -> Path:
+        return atomic_write_json(self.history_path, self._history_payload(transition))
+
+    def commit(self, snapshot: WorkflowSnapshot, transition: WorkflowTransition) -> Path:
+        """Atomically persist state, readable history, and the audit event."""
+
+        before = {
+            self.state_path: self._file_bytes(self.state_path),
+            self.history_path: self._file_bytes(self.history_path),
+            self.events_path: self._file_bytes(self.events_path),
+        }
+        try:
+            self.save(snapshot)
+            self._append_history(transition)
+            self._append_event(transition.to_event())
+        except Exception:
+            for path, content in before.items():
+                self._restore_file(path, content)
+            raise
+        return self.state_path
+
+    def record(self, transition: WorkflowTransition) -> Path:
+        """Append one transition to history and the JSONL audit log atomically."""
+
+        before = {
+            self.history_path: self._file_bytes(self.history_path),
+            self.events_path: self._file_bytes(self.events_path),
+        }
+        try:
+            self._append_history(transition)
+            self._append_event(transition.to_event())
+        except Exception:
+            for path, content in before.items():
+                self._restore_file(path, content)
+            raise
+        return self.history_path
 
     def _append_event(self, event: WorkflowEvent) -> Path:
         """Append exactly one event line without rewriting prior audit records."""
 
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event.to_dict(), ensure_ascii=False) + "\n")
-        return self.events_path
+        return append_jsonl_event(self.events_path, event.to_dict())
 
-    def events(self) -> list[WorkflowEvent]:
-        """Read the append-only event log, ignoring malformed lines safely."""
+    def event_records(self) -> list[WorkflowEventRecord]:
+        """Read the ledger strictly, retaining original JSONL line indexes."""
 
         if not self.events_path.is_file():
             return []
-        result: list[WorkflowEvent] = []
-        for line in self.events_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+        try:
+            lines = self.events_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"workflow event ledger cannot be read: {error}") from error
+        result: list[WorkflowEventRecord] = []
+        for line_number, line in enumerate(lines, start=1):
+            has_newline = line.endswith(("\n", "\r"))
+            raw_line = line.rstrip("\r\n")
+            if not raw_line.strip():
+                raise ValueError(f"workflow event ledger line {line_number} is blank or corrupt")
             try:
-                value = json.loads(line)
-                if not isinstance(value, dict):
-                    continue
-                schema_version = int(value.get("schema_version", 0))
-                if schema_version > EVENT_SCHEMA_VERSION:
-                    raise ValueError(
-                        f"workflow event schema {schema_version} is newer than supported "
-                        f"schema {EVENT_SCHEMA_VERSION}"
-                    )
-                from_value = value.get("from")
-                result.append(
-                    WorkflowEvent(
-                        timestamp=_parse_datetime(value.get("timestamp")),
-                        event=str(value.get("event", "STATE_TRANSITION")),
-                        from_state=_state_value(from_value) if from_value else None,
-                        to_state=_state_value(value.get("to")),
-                        actor=str(value.get("actor", "codex")),
-                        reason=str(value.get("reason", "")),
-                        schema_version=EVENT_SCHEMA_VERSION,
-                    )
+                value = json.loads(raw_line)
+            except json.JSONDecodeError as error:
+                suffix = " (truncated tail)" if line_number == len(lines) and not has_newline else ""
+                raise ValueError(
+                    f"workflow event ledger line {line_number} is invalid JSON{suffix}"
+                ) from error
+            if not has_newline:
+                raise ValueError(
+                    f"workflow event ledger line {line_number} has a truncated tail "
+                    "(missing newline)"
                 )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"workflow event ledger line {line_number} must be a JSON object"
+                )
+            schema_version = value.get("schema_version")
+            if schema_version != EVENT_SCHEMA_VERSION:
+                raise ValueError(
+                    f"workflow event ledger line {line_number} has unsupported schema "
+                    f"{schema_version!r}; expected {EVENT_SCHEMA_VERSION}"
+                )
+            if "to" not in value or "timestamp" not in value or "event" not in value:
+                raise ValueError(
+                    f"workflow event ledger line {line_number} is missing required fields"
+                )
+            event = value["event"]
+            actor = value.get("actor", "codex")
+            reason = value.get("reason", "")
+            if not isinstance(event, str) or not event.strip():
+                raise ValueError(f"workflow event ledger line {line_number} has an invalid event")
+            if not isinstance(actor, str) or not actor.strip():
+                raise ValueError(f"workflow event ledger line {line_number} has an invalid actor")
+            if not isinstance(reason, str):
+                raise ValueError(f"workflow event ledger line {line_number} has an invalid reason")
+            try:
+                from_value = value.get("from")
+                from_state = _state_value(from_value) if from_value else None
+                to_state = _state_value(value["to"])
+            except ValueError as error:
+                raise ValueError(
+                    f"workflow event ledger line {line_number} has an invalid state: {error}"
+                ) from error
+            result.append(
+                WorkflowEventRecord(
+                    index=line_number,
+                    event=WorkflowEvent(
+                        timestamp=_parse_datetime_strict(
+                            value["timestamp"],
+                            f"workflow event ledger line {line_number} timestamp",
+                        ),
+                        event=event,
+                        from_state=from_state,
+                        to_state=to_state,
+                        actor=actor,
+                        reason=reason,
+                        schema_version=schema_version,
+                    ),
+                )
+            )
         return result
+
+    def events(self) -> list[WorkflowEvent]:
+        """Read the append-only event log and fail closed on corruption."""
+
+        return [record.event for record in self.event_records()]
 
     def query_events(
         self,
@@ -387,7 +508,9 @@ class WorkflowStateStore:
         event_value = event.casefold() if event else None
         actor_value = actor.casefold() if actor else None
         result: list[WorkflowEventRecord] = []
-        for index, item in enumerate(self.events(), start=1):
+        for record in self.event_records():
+            index = record.index
+            item = record.event
             if event_value and item.event.casefold() != event_value:
                 continue
             if actor_value and item.actor.casefold() != actor_value:
@@ -440,13 +563,23 @@ class WorkflowStateStore:
         if not reason.strip():
             raise ValueError("workflow rollback reason must not be empty")
         current = snapshot or self.load()
-        records = self.events()
-        if event_index >= len(records):
+        records = self.event_records()
+        record_indexes = {record.index for record in records}
+        if event_index not in record_indexes or event_index >= max(record_indexes, default=0):
             raise ValueError(
                 "rollback target must be an earlier event index "
-                f"(1-{max(len(records) - 1, 0)})"
+                f"(1-{max(max(record_indexes, default=0) - 1, 0)})"
             )
-        target = records[event_index - 1]
+        target = next(record for record in records if record.index == event_index).event
+        if target.to_state in IMPLEMENTATION_STATES:
+            from .approval import PlanApprovalStore
+
+            plan = current.plan or self.root / ".codex" / "pro-plan" / "PLAN.md"
+            if not PlanApprovalStore(self.root, plan=plan).is_approved():
+                raise ValueError(
+                    "rollback target requires an effective PLAN.md approval; "
+                    "implementation was not restored"
+                )
         paused_from = target.from_state if target.to_state == WorkflowState.PAUSED else None
         if target.to_state == WorkflowState.PAUSED and paused_from is None:
             raise ValueError("cannot rollback to a paused event without a resumable state")
@@ -461,8 +594,8 @@ class WorkflowStateStore:
             error=None,
             paused_from=paused_from,
         )
-        self.save(updated)
-        self.record(
+        self.commit(
+            updated,
             WorkflowTransition(
                 from_state=current.state,
                 to_state=target.to_state,
@@ -492,8 +625,8 @@ class WorkflowStateStore:
             started=now,
             updated=now,
         )
-        self.save(snapshot)
-        self.record(
+        self.commit(
+            snapshot,
             WorkflowTransition(
                 from_state=previous.state,
             to_state=WorkflowState.NEW_TASK,

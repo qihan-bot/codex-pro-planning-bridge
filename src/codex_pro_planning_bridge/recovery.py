@@ -8,11 +8,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .approval import plan_digest
+from .approval import plan_digest, PlanApprovalStore
+from .memory import MEMORY_METADATA_FILE, ProjectMemory
 from .models import WorkflowState
-from .repository import resolve_repo, resolve_repo_path
+from .repository import git_commit_exists, git_repository_state, resolve_repo, resolve_repo_path
 from .snapshot import DEFAULT_PLAN, SnapshotManager, SnapshotRecord
-from .state import WorkflowSnapshot, WorkflowStateStore, WorkflowTransition
+from .state import IMPLEMENTATION_STATES, WorkflowSnapshot, WorkflowStateStore, WorkflowTransition
 
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -48,6 +49,8 @@ class RecoveryResult:
     state: WorkflowState
     history_position: int
     recovery_event_index: int
+    post_recovery_snapshot_id: int | None = None
+    post_recovery_snapshot_path: Path | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +59,12 @@ class RecoveryResult:
             "state": self.state.value,
             "history_position": self.history_position,
             "recovery_event_index": self.recovery_event_index,
+            "post_recovery_snapshot_id": self.post_recovery_snapshot_id,
+            "post_recovery_snapshot_path": (
+                str(self.post_recovery_snapshot_path)
+                if self.post_recovery_snapshot_path
+                else None
+            ),
         }
 
 
@@ -159,6 +168,10 @@ class RecoveryEngine:
 
         events = self.store.events()
         history = self.store.history(migrate=False)
+        if len(events) != len(history):
+            raise ValueError(
+                f"workflow history has {len(history)} entries but event ledger has {len(events)}"
+            )
         if len(events) < history_position:
             raise ValueError(
                 f"event ledger has {len(events)} entries; snapshot requires "
@@ -169,6 +182,56 @@ class RecoveryEngine:
                 f"workflow history has {len(history)} entries; snapshot requires "
                 f"{history_position}"
             )
+        current_commit, current_dirty = git_repository_state(
+            self.root,
+            excluded_paths=(self.snapshots.directory.relative_to(self.root),),
+        )
+        snapshot_commit = repository.get("commit")
+        if snapshot_commit is not None:
+            if not git_commit_exists(self.root, snapshot_commit):
+                raise ValueError(f"snapshot repository commit does not exist: {snapshot_commit}")
+            if current_commit != snapshot_commit:
+                raise ValueError(
+                    f"current repository HEAD {current_commit} differs from snapshot commit "
+                    f"{snapshot_commit}"
+                )
+        elif current_commit is not None:
+            raise ValueError("snapshot has no repository commit but the current repository has Git")
+        if current_dirty != repository.get("dirty"):
+            raise ValueError(
+                f"current repository dirty state {current_dirty} differs from snapshot "
+                f"{repository.get('dirty')}"
+            )
+
+        approval_plan = plan_path or resolve_repo_path(self.root, DEFAULT_PLAN)
+        current_approval = PlanApprovalStore(self.root, plan=approval_plan).status()
+        for key in ("status", "plan_sha256", "approved_by", "timestamp"):
+            if current_approval.get(key) != approval.get(key):
+                raise ValueError(
+                    f"current approval {key} differs from snapshot: "
+                    f"{current_approval.get(key)!r} != {approval.get(key)!r}"
+                )
+        snapshot_expires_at = approval.get("expires_at")
+        if snapshot_expires_at is not None and current_approval.get("expires_at") != snapshot_expires_at:
+            raise ValueError("current approval expiry differs from snapshot")
+        if state in IMPLEMENTATION_STATES and not current_approval.get("effective"):
+            raise ValueError(
+                "snapshot restores an implementation state without effective PLAN.md approval"
+            )
+
+        memory_path = self.root / MEMORY_METADATA_FILE
+        snapshot_memory = memory
+        if snapshot_memory.get("version") is None:
+            if memory_path.is_file():
+                raise ValueError("current Project Memory exists but snapshot has no memory version")
+        elif not memory_path.is_file():
+            raise ValueError("snapshot Project Memory is missing from the current repository")
+        else:
+            current_memory = ProjectMemory(self.root).metadata()
+            if current_memory.get("version") != snapshot_memory.get("version"):
+                raise ValueError("current Project Memory version differs from snapshot")
+            if current_memory.get("schema_version") != snapshot_memory.get("schema_version"):
+                raise ValueError("current Project Memory schema differs from snapshot")
         return workflow, state, plan_path, history_position
 
     def recover(
@@ -208,9 +271,9 @@ class RecoveryEngine:
             error=None,
             paused_from=paused_from,
         )
-        self.store.save(updated)
         recovery_event_index = len(self.store.events()) + 1
-        self.store.record(
+        self.store.commit(
+            updated,
             WorkflowTransition(
                 from_state=current.state,
                 to_state=state,
@@ -220,12 +283,15 @@ class RecoveryEngine:
                 actor="user",
             )
         )
+        post_recovery_snapshot = self.snapshots.create()
         return RecoveryResult(
             snapshot_id=record.snapshot_id,
             snapshot_path=record.path,
             state=state,
-            history_position=history_position,
+            history_position=post_recovery_snapshot.payload["workflow"]["history_position"],
             recovery_event_index=recovery_event_index,
+            post_recovery_snapshot_id=post_recovery_snapshot.snapshot_id,
+            post_recovery_snapshot_path=post_recovery_snapshot.path,
         )
 
 

@@ -7,10 +7,12 @@ safe text writes used by the CLI features.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 from typing import Iterable
 
 from .models import FileChange
@@ -75,10 +77,123 @@ def resolve_repo_path(repo: Path, value: str | Path) -> Path:
     return path.resolve() if path.is_absolute() else (repo / path).resolve()
 
 
-def write_text(path: Path, content: str) -> Path:
+def atomic_write_bytes(path: Path, content: bytes) -> Path:
+    """Replace a file atomically after flushing its complete byte content."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content.rstrip() + "\n", encoding="utf-8", newline="\n")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    descriptor_open = True
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor_open = False
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        try:
+            directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            directory_descriptor = None
+        if directory_descriptor is not None:
+            try:
+                os.fsync(directory_descriptor)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_descriptor)
+        return path
+    finally:
+        if descriptor_open:
+            os.close(descriptor)
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def atomic_write_text(path: Path, content: str) -> Path:
+    """Atomically write normalized UTF-8 text."""
+
+    return atomic_write_bytes(path, (content.rstrip() + "\n").encode("utf-8"))
+
+
+def atomic_write_json(path: Path, payload: object) -> Path:
+    """Atomically write a human-readable JSON document."""
+
+    return atomic_write_text(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=False),
+    )
+
+
+def create_immutable_text(path: Path, content: str) -> Path:
+    """Publish a text file exactly once without exposing partial content."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    descriptor_open = True
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor_open = False
+            handle.write(content.rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Linking is atomic and exclusive: it never overwrites an existing
+        # numbered snapshot, while readers never observe the temp file.
+        os.link(temporary_path, path)
+        try:
+            directory_descriptor = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            directory_descriptor = None
+        if directory_descriptor is not None:
+            try:
+                os.fsync(directory_descriptor)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_descriptor)
+        return path
+    except Exception:
+        raise
+    finally:
+        if descriptor_open:
+            os.close(descriptor)
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def create_immutable_json(path: Path, payload: object) -> Path:
+    """Create a JSON document exactly once, failing on an existing path."""
+
+    return create_immutable_text(
+        path,
+        json.dumps(payload, indent=2, ensure_ascii=False),
+    )
+
+
+def append_jsonl_event(path: Path, payload: object) -> Path:
+    """Append and flush one JSONL record without rewriting prior records."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     return path
+
+
+def write_text(path: Path, content: str) -> Path:
+    """Compatibility wrapper using the atomic text writer."""
+
+    return atomic_write_text(path, content)
 
 
 def is_sensitive_path(path: str | Path) -> bool:
@@ -157,6 +272,13 @@ def git_repository_state(
         dirty = True
         break
     return commit, dirty
+
+
+def git_commit_exists(repo: str | Path, commit: str) -> bool:
+    """Return whether a commit object exists in the local repository."""
+
+    root = resolve_repo(repo)
+    return run_git(root, ("rev-parse", "--verify", f"{commit}^{{commit}}")) is not None
 
 
 def list_repository_paths(repo: Path, *, include_hidden: bool = False) -> list[str] | None:
