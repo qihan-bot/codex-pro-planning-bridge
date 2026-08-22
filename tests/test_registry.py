@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from codex_pro_planning_bridge.repository import iter_project_files
 from codex_pro_planning_bridge.registry import (
     RegistryError,
     RepositoryRegistry,
@@ -180,7 +181,10 @@ class RepositoryRegistryTests(unittest.TestCase):
 
     def test_resolve_authorized_rechecks_flags_identity_and_existence(self) -> None:
         self.registry.add("demo", self.project, allow_non_git=True)
-        self.assertEqual(self.registry.resolve_authorized("demo").canonical_path, self.project)
+        self.assertEqual(
+            self.registry.resolve_authorized("demo").canonical_path,
+            self.project.resolve(),
+        )
 
         payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
         payload["repositories"]["demo"]["enabled"] = False
@@ -262,6 +266,16 @@ class RepositoryRegistryTests(unittest.TestCase):
             summary = self.registry._scan_path(self.project)
         self.assertEqual(summary.unreadable_directories, 1)
         self.assertFalse(summary.scan_truncated)
+
+    def test_filesystem_fallback_filters_relative_paths_not_absolute_prefixes(self) -> None:
+        private_root = self.root / "private"
+        project = private_root / "project"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "main.py").write_text("def main(): pass\n", encoding="utf-8")
+
+        files = iter_project_files(project)
+
+        self.assertEqual(files, [("src/main.py", project / "src" / "main.py")])
 
     def test_dangerous_roots_are_rejected(self) -> None:
         config_dir = self.registry_path.parent

@@ -294,7 +294,9 @@ def list_repository_paths(repo: Path, *, include_hidden: bool = False) -> list[s
         directories[:] = sorted(
             directory
             for directory in directories
-            if not is_ignored_path(current_path / directory / "marker")
+            if not is_ignored_path(
+                (current_path / directory / "marker").relative_to(repo).as_posix()
+            )
             and (include_hidden or not directory.startswith("."))
         )
         for filename in sorted(filenames):

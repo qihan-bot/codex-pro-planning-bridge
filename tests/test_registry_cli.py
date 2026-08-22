@@ -51,7 +51,10 @@ class RepositoryRegistryCliTests(unittest.TestCase):
 
         result, output, error = self._run("repo", "show", "demo", "--format", "json")
         self.assertEqual(result, 0, error)
-        self.assertEqual(json.loads(output)["repository"]["canonical_path"], str(self.project))
+        self.assertEqual(
+            json.loads(output)["repository"]["canonical_path"],
+            str(self.project.resolve()),
+        )
 
         result, output, error = self._run("repo", "doctor", "demo", "--format", "json")
         self.assertEqual(result, 0, error)
