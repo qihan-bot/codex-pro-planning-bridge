@@ -72,7 +72,10 @@ class PlanDiffTests(unittest.TestCase):
 
             report_path, result = diff_plan(root)
 
-            self.assertEqual(report_path, root / ".codex" / "pro-plan" / "PLAN_DIFF.md")
+            self.assertEqual(
+                report_path,
+                root.resolve() / ".codex" / "pro-plan" / "PLAN_DIFF.md",
+            )
             self.assertTrue(report_path.is_file())
             self.assertFalse(result.ok)
             self.assertIn("DRIFT DETECTED", report_path.read_text(encoding="utf-8"))

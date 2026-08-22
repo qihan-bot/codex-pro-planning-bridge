@@ -74,7 +74,10 @@ class RepositoryRegistryTests(unittest.TestCase):
         payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema_version"], 1)
         self.assertEqual(list(payload["repositories"]), ["alpha", "zeta"])
-        self.assertEqual(payload["repositories"]["alpha"]["canonical_path"], str(self.project))
+        self.assertEqual(
+            payload["repositories"]["alpha"]["canonical_path"],
+            str(self.project.resolve()),
+        )
         if os.name != "nt":
             self.assertEqual(self.registry_path.stat().st_mode & 0o777, 0o600)
 
@@ -96,7 +99,7 @@ class RepositoryRegistryTests(unittest.TestCase):
             self.registry.add("plain", self.project)
         self.assertEqual(raised.exception.code, "non_git")
         registration = self.registry.add("plain", self.project, allow_non_git=True)
-        self.assertEqual(registration.canonical_path, self.project)
+        self.assertEqual(registration.canonical_path, self.project.resolve())
         self.assertFalse(self.registry.doctor("plain").is_git)
 
         git_project = self.root / "git-project"
@@ -115,7 +118,7 @@ class RepositoryRegistryTests(unittest.TestCase):
         nested.mkdir()
 
         registration = self.registry.add("git-root", git_project)
-        self.assertEqual(registration.canonical_path, git_project)
+        self.assertEqual(registration.canonical_path, git_project.resolve())
         with self.assertRaises(RegistryError) as raised:
             self.registry.add("git-nested", nested)
         self.assertEqual(raised.exception.code, "git_subdirectory")
@@ -220,7 +223,7 @@ class RepositoryRegistryTests(unittest.TestCase):
             empty_registry.get("demo")
         self.assertEqual(raised.exception.code, "not_found")
         preview = empty_registry.preview(self.project, allow_non_git=True)
-        self.assertEqual(preview.canonical_path, self.project)
+        self.assertEqual(preview.canonical_path, self.project.resolve())
         self.assertFalse(self.registry_path.exists())
         self.assertFalse(empty_registry.lock_path.exists())
 
@@ -275,7 +278,7 @@ class RepositoryRegistryTests(unittest.TestCase):
 
         files = iter_project_files(project)
 
-        self.assertEqual(files, [("src/main.py", project / "src" / "main.py")])
+        self.assertEqual(files, [("src/main.py", project.resolve() / "src" / "main.py")])
 
     def test_dangerous_roots_are_rejected(self) -> None:
         config_dir = self.registry_path.parent
