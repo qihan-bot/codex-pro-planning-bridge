@@ -1,6 +1,6 @@
 # v0.4 ChatGPT Client Integration Documentation
 
-Status: **Planning complete; implementation not started on this documentation branch.**
+Status: **Phase 1 Repository Registry in implementation; Draft PR review gate.**
 
 v0.4 changes Codex Pro Planning Bridge from a CLI-first tool into a client-first universal plugin:
 
@@ -100,6 +100,9 @@ feat/v0.4-repository-registry
 ```
 
 The Agent must stop after opening the Phase 1 Draft PR. It must not implement the MCP server on the same unreviewed branch.
+
+Phase 1 implementation evidence and the exact non-scope are tracked in
+[`REGISTRY_PHASE1.md`](REGISTRY_PHASE1.md).
 
 ## Platform notes
 

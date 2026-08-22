@@ -2,6 +2,8 @@
 
 Release status: **v0.3.3 Reliability Layer** (`v0.3.3-beta.1`).
 
+Development status: **v0.4 Phase 1 — Repository Registry** (`feat/v0.4-repository-registry`, Draft PR review gate).
+
 Codex Pro Planning Bridge is a local-first Python CLI and Codex skill for turning a complex coding request into a structured architecture review for ChatGPT Pro. Codex remains the implementation agent; ChatGPT Pro is the human-reviewed planning step.
 
 The bridge has no OpenAI API integration, does not require an API key, and never submits a prompt automatically.
@@ -128,6 +130,41 @@ cpb recover --repo . --snapshot latest
 cpb approve --repo . --plan .codex/pro-plan/PLAN.md --approved-by user --expires-in 3600
 cpb approve --repo . --revoke --reason "plan needs another review"
 ```
+
+## v0.4 Phase 1: Repository Registry
+
+The first v0.4 implementation adds a per-user, versioned repository allowlist
+for future read-only MCP access. The local CLI remains the authority for
+registration; MCP is not implemented on this branch and must receive only a
+registered `repository_id` in a later phase.
+
+```bash
+# Register a Git repository. The CLI canonicalizes the path and asks for confirmation.
+cpb repo add my-app D:\Projects\my-app
+
+# Register a non-Git directory only with explicit opt-in.
+cpb repo add notes D:\Notes --allow-non-git --yes
+
+cpb repo list
+cpb repo list --format json
+cpb repo show my-app
+cpb repo doctor my-app
+cpb repo remove my-app
+```
+
+The registry is stored in the current user's platform configuration directory
+as `repositories.json`. A local `CPB_REGISTRY_PATH` environment override (or
+`--registry-path`, intended for tests and managed deployments) is available to
+the CLI; it is not a model-facing or MCP input. Writes are schema-versioned,
+lock-protected, atomic, and fail closed when the existing file is corrupt or
+newer than the supported schema. Root directories, the user home directory,
+credential/secret roots, symlink or junction escapes, and sensitive paths are
+rejected or redacted. Removing a registration never touches repository files.
+
+Phase 1 intentionally does not add an MCP server, Plan Capsule, client
+integration, Skills split, browser automation, OpenAI API call, or API-key
+configuration. See [`docs/v0.4/REGISTRY_PHASE1.md`](docs/v0.4/REGISTRY_PHASE1.md)
+for the implementation boundary and verification notes.
 
 The full codex-pro-planning-bridge command remains available as the long-form equivalent of cpb. The older request command is retained as an alias for prompt.
 
@@ -321,6 +358,7 @@ The project is packaged with `pyproject.toml` and exposes both the `codex-pro-pl
 - [x] v0.3.1 Planning Safety Layer (`v0.3.1-beta`)
 - [x] v0.3.2 Hardening (`v0.3.2`)
 - [x] v0.3.3 Reliability Layer (`v0.3.3-beta.1`)
+- [ ] v0.4 Phase 1 Repository Registry (implementation branch; Draft PR review pending)
 
 ## License
 
