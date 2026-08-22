@@ -13,16 +13,25 @@ implementation surface, and the CLI remains the local runtime/debug surface.
 - lowercase canonical repository IDs with reserved-ID and traversal-like input
   rejection;
 - canonical path registration with Git detection and explicit non-Git opt-in;
+- Git-root-only registration with the stable `git_subdirectory` rejection;
+  worktree and submodule roots are accepted without expanding authorization to
+  a parent repository;
 - `cpb repo add`, `list`, `show`, `remove`, and `doctor`;
-- lock-protected read/validate/write cycles and same-directory atomic replacement;
+- lock-protected write/validate cycles and same-directory atomic replacement;
+- metadata-only `get`/`list` reads plus a `resolve_authorized()` boundary that
+  rechecks access flags, existence, directory identity, path policy, and the
+  Git root at the moment a caller uses a registration;
 - fail-closed handling for corrupt or unsupported newer registry schemas;
 - Unix `0600` best-effort permissions and user-profile storage on Windows;
 - filesystem-root, user-home, bridge-config, credential/secret-root, and
   sensitive-path protections;
 - root symlink/junction canonicalization and bounded child-link containment
-  checks; and
+  checks;
+- bounded preview and health scans with file, directory, and depth budgets,
+  unreadable-directory accounting, and a `scan_truncated` indicator; and
 - tests for CLI behavior, no repository mutation, concurrent writers,
-  interrupted writes, symlink boundaries, and schema corruption.
+  multi-process writers, interrupted writes, symlink/junction boundaries,
+  authorization tampering, scan limits, and schema corruption.
 
 ## Local registry location
 
@@ -48,8 +57,19 @@ cpb repo remove my-app
 ```
 
 `add` and `remove` ask for explicit confirmation unless `--yes` is supplied.
-`remove` deletes only the registry entry. The CLI may show local canonical
-paths; a future MCP response must not return them.
+In `--format json` mode, `--yes` is mandatory: missing confirmation returns a
+single JSON error document with `code: "confirmation_required"` and never
+prompts. Other registry errors expose their stable error code in the same JSON
+shape. `remove` deletes only the registry entry. The CLI may show local
+canonical paths; a future MCP response must not return them.
+
+Read-only commands do not create `repositories.json` or its lock file in an
+empty environment. The lock is acquired only for registry writes; scanning is
+performed outside the lock. Scan counts are observed counts, not repository
+totals. When a file, directory, or depth budget is reached, `scan_truncated`
+is true and consumers must treat any count as incomplete. Sensitive and
+ignored paths are counted as redacted observations, while child symlinks and
+junctions are inspected for containment and never followed.
 
 ## Verification
 

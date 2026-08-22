@@ -152,6 +152,27 @@ cpb repo doctor my-app
 cpb repo remove my-app
 ```
 
+Git registrations must name the canonical Git root itself. A repository
+subdirectory is rejected with `git_subdirectory`; worktree roots and nested
+submodule roots are valid independent Git roots. The registry never expands a
+subdirectory registration to a parent repository.
+
+`list`, `show`/`get`, and path preview are read-only and do not create an empty
+registry or lock file. Only add/remove persistence uses the exclusive registry
+lock. Runtime consumers must use the authorization boundary represented by
+`resolve_authorized()`, which rechecks enabled/read flags, existence, directory
+identity, path policy, and the Git-root boundary at use time.
+
+Repository scans are deliberately bounded. They cap visited files,
+directories, and depth; they never follow child symlinks or junctions. A
+`scan_truncated: true` result means the reported counts are observations of
+the portion scanned, not exact totals for the unvisited repository.
+
+For automation, `--format json` emits one JSON document on stdout. `add` and
+`remove` require explicit `--yes` in JSON mode and otherwise return the stable
+`confirmation_required` error code without prompting. Registry errors include
+their stable `code` in the JSON error object.
+
 The registry is stored in the current user's platform configuration directory
 as `repositories.json`. A local `CPB_REGISTRY_PATH` environment override (or
 `--registry-path`, intended for tests and managed deployments) is available to

@@ -18,7 +18,7 @@ from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
 from .recovery import RecoveryEngine
-from .registry import RepositoryRegistry
+from .registry import RegistryError, RepositoryRegistry
 from .snapshot import SnapshotManager
 from .state import WorkflowStateStore
 from .validator import validate as validate_repository
@@ -414,8 +414,9 @@ def _print_repository_payload(payload: object, output_format: str) -> None:
                     print(f"HEAD: {health.get('head') or '(none)'}")
                     print(f"Branch: {health.get('branch') or '(detached or none)'}")
                     print(f"Dirty: {health.get('dirty')}")
-                    print(f"Redacted paths: {health.get('redacted_count', 0)}")
-                    print(f"Omitted paths: {health.get('omitted_count', 0)}")
+                    print(f"Observed redacted paths: {health.get('redacted_count', 0)}")
+                    print(f"Observed omitted paths: {health.get('omitted_count', 0)}")
+                    print(f"Scan truncated: {health.get('scan_truncated', False)}")
                     for issue in health.get("issues", []):
                         print(f"- {issue}")
                     for warning in health.get("warnings", []):
@@ -442,9 +443,10 @@ def _print_repository_payload(payload: object, output_format: str) -> None:
             print(f"Path: {health.get('canonical_path', '')}")
             print(f"Git: {health.get('is_git', False)}")
             print(f"Dirty: {health.get('dirty')}")
-            print(f"Redacted paths: {health.get('redacted_count', 0)}")
-            print(f"Omitted paths: {health.get('omitted_count', 0)}")
+            print(f"Observed redacted paths: {health.get('redacted_count', 0)}")
+            print(f"Observed omitted paths: {health.get('omitted_count', 0)}")
             print(f"Symlink escapes: {health.get('symlink_escapes', 0)}")
+            print(f"Scan truncated: {health.get('scan_truncated', False)}")
             for warning in health.get("warnings", []):
                 print(f"Warning: {warning}")
             for issue in health.get("issues", []):
@@ -465,6 +467,11 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "repo":
         registry = RepositoryRegistry(args.registry_path)
         if args.repo_command == "add":
+            if args.format == "json" and not args.yes:
+                raise RegistryError(
+                    "explicit confirmation is required; pass --yes",
+                    code="confirmation_required",
+                )
             preview = registry.preview(args.path, allow_non_git=args.allow_non_git)
             if not args.yes:
                 print(f"Register repository {args.repository_id} at {preview.canonical_path}")
@@ -517,6 +524,11 @@ def _run(args: argparse.Namespace) -> int:
             )
             return 0
         if args.repo_command == "remove":
+            if args.format == "json" and not args.yes:
+                raise RegistryError(
+                    "explicit confirmation is required; pass --yes",
+                    code="confirmation_required",
+                )
             registration = registry.show(args.repository_id)
             if not args.yes:
                 if not _confirm(f"Remove repository {registration.repository_id}? [y/N] "):
@@ -908,5 +920,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args)
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        if getattr(args, "command", None) == "repo" and getattr(args, "format", "text") == "json":
+            error_code = getattr(error, "code", None)
+            if not isinstance(error_code, str) or not error_code:
+                error_code = "io_error" if isinstance(error, OSError) else "runtime_error"
+            print(
+                json.dumps(
+                    {"error": {"code": error_code, "message": str(error)}},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 2

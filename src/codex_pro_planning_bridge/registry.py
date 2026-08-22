@@ -11,13 +11,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import importlib
 import json
 import os
 from pathlib import Path
 import re
 import sys
 import threading
-from typing import Iterator, List, Mapping
+from typing import Any, Iterator, List, Mapping
 
 from .repository import atomic_write_text, is_ignored_path, run_git
 
@@ -59,7 +60,9 @@ _DANGEROUS_DIRECTORY_NAMES = frozenset(
         "tokens",
     }
 )
-_MAX_HEALTH_FILES = 1_000
+MAX_SCAN_FILES = 1_000
+MAX_SCAN_DIRECTORIES = 1_000
+MAX_SCAN_DEPTH = 32
 
 
 class RegistryError(ValueError):
@@ -68,6 +71,32 @@ class RegistryError(ValueError):
     def __init__(self, message: str, *, code: str = "registry_error") -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class ScanLimits:
+    """Hard limits for a bounded, non-executing repository preview."""
+
+    max_files: int = MAX_SCAN_FILES
+    max_directories: int = MAX_SCAN_DIRECTORIES
+    max_depth: int = MAX_SCAN_DEPTH
+
+    def __post_init__(self) -> None:
+        if self.max_files < 1 or self.max_directories < 1 or self.max_depth < 0:
+            raise ValueError("scan limits must be positive, with max_depth >= 0")
+
+
+@dataclass(frozen=True)
+class ScanSummary:
+    """Observed scan facts; counts are not complete when ``scan_truncated`` is true."""
+
+    redacted_count: int = 0
+    omitted_count: int = 0
+    symlink_escapes: int = 0
+    visited_files: int = 0
+    visited_directories: int = 0
+    unreadable_directories: int = 0
+    scan_truncated: bool = False
 
 
 def _utc_now() -> str:
@@ -168,7 +197,7 @@ def _is_link_or_junction(path: Path) -> bool:
 
 
 def _safe_chmod(path: Path, mode: int = 0o600) -> None:
-    if os.name != "nt":
+    if sys.platform != "win32":
         try:
             path.chmod(mode)
         except OSError:
@@ -284,6 +313,11 @@ class RepositoryPreview:
     redacted_count: int = 0
     symlink_escapes: int = 0
     warnings: tuple[str, ...] = ()
+    omitted_count: int = 0
+    visited_files: int = 0
+    visited_directories: int = 0
+    unreadable_directories: int = 0
+    scan_truncated: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -292,6 +326,11 @@ class RepositoryPreview:
             "git_root": str(self.git_root) if self.git_root else None,
             "redacted_count": self.redacted_count,
             "symlink_escapes": self.symlink_escapes,
+            "omitted_count": self.omitted_count,
+            "visited_files": self.visited_files,
+            "visited_directories": self.visited_directories,
+            "unreadable_directories": self.unreadable_directories,
+            "scan_truncated": self.scan_truncated,
             "warnings": list(self.warnings),
         }
 
@@ -314,6 +353,11 @@ class RepositoryHealth:
     symlink_escapes: int = 0
     issues: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    error_codes: tuple[str, ...] = ()
+    visited_files: int = 0
+    visited_directories: int = 0
+    unreadable_directories: int = 0
+    scan_truncated: bool = False
 
     @property
     def ok(self) -> bool:
@@ -336,6 +380,11 @@ class RepositoryHealth:
             "symlink_escapes": self.symlink_escapes,
             "issues": list(self.issues),
             "warnings": list(self.warnings),
+            "error_codes": list(self.error_codes),
+            "visited_files": self.visited_files,
+            "visited_directories": self.visited_directories,
+            "unreadable_directories": self.unreadable_directories,
+            "scan_truncated": self.scan_truncated,
         }
 
 
@@ -344,7 +393,7 @@ _THREAD_LOCKS_GUARD = threading.Lock()
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:
-    key = str(path).casefold() if os.name == "nt" else str(path)
+    key = str(path).casefold() if sys.platform == "win32" else str(path)
     with _THREAD_LOCKS_GUARD:
         lock = _THREAD_LOCKS.get(key)
         if lock is None:
@@ -368,34 +417,35 @@ def _file_lock(path: Path) -> Iterator[None]:
             handle.flush()
             os.fsync(handle.fileno())
         handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        locker: Any
+        if sys.platform == "win32":
+            locker = importlib.import_module("msvcrt")
+            locker.locking(handle.fileno(), locker.LK_LOCK, 1)
         else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+            locker = importlib.import_module("fcntl")
+            locker.flock(handle.fileno(), locker.LOCK_EX)
         try:
             yield
         finally:
-            if os.name == "nt":
-                import msvcrt
-
+            if sys.platform == "win32":
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                locker.locking(handle.fileno(), locker.LK_UNLCK, 1)
             else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                locker.flock(handle.fileno(), locker.LOCK_UN)
 
 
 class RepositoryRegistry:
     """Read and atomically persist the per-user repository allowlist."""
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        scan_limits: ScanLimits | None = None,
+    ) -> None:
         self.path = registry_path_from_environment(path)
         self.lock_path = self.path.with_name(f"{self.path.name}.lock")
+        self.scan_limits = scan_limits or ScanLimits()
 
     def _ensure_storage_is_safe(self) -> None:
         if self.path.is_symlink():
@@ -469,23 +519,21 @@ class RepositoryRegistry:
         _safe_chmod(self.path)
 
     def list(self) -> List[RepositoryRegistration]:
-        with self._locked():
-            return list(self._load_unlocked().values())
+        return list(self._load_unlocked().values())
 
     def list_repositories(self) -> List[RepositoryRegistration]:
         return self.list()
 
     def get(self, repository_id: str) -> RepositoryRegistration:
         repository_id = validate_repository_id(repository_id)
-        with self._locked():
-            repositories = self._load_unlocked()
-            try:
-                return repositories[repository_id]
-            except KeyError as error:
-                raise RegistryError(
-                    f"repository is not registered: {repository_id}",
-                    code="not_found",
-                ) from error
+        repositories = self._load_unlocked()
+        try:
+            return repositories[repository_id]
+        except KeyError as error:
+            raise RegistryError(
+                f"repository is not registered: {repository_id}",
+                code="not_found",
+            ) from error
 
     def show(self, repository_id: str) -> RepositoryRegistration:
         return self.get(repository_id)
@@ -504,6 +552,10 @@ class RepositoryRegistry:
             ) from error
         if not canonical.is_dir():
             raise RegistryError("repository path must be a directory", code="invalid_path")
+        self._validate_canonical_path_policy(canonical)
+        return canonical
+
+    def _validate_canonical_path_policy(self, canonical: Path) -> None:
         if canonical == Path(canonical.anchor):
             raise RegistryError("filesystem roots cannot be registered", code="unsafe_path")
         try:
@@ -533,7 +585,6 @@ class RepositoryRegistry:
             )
         if canonical.name.casefold() in {".env", ".git-credentials"}:
             raise RegistryError("secret paths cannot be registered", code="unsafe_path")
-        return canonical
 
     def _git_details(self, canonical: Path) -> tuple[bool, Path | None]:
         output = run_git(canonical, ("rev-parse", "--show-toplevel"))
@@ -555,9 +606,15 @@ class RepositoryRegistry:
         value: str | Path,
         *,
         allow_non_git: bool,
+        scan: bool,
     ) -> RepositoryPreview:
         canonical = self._canonicalize_registration_path(value)
         is_git, git_root = self._git_details(canonical)
+        if is_git and git_root != canonical:
+            raise RegistryError(
+                "a Git subdirectory cannot be registered; register the Git root instead",
+                code="git_subdirectory",
+            )
         warnings: list[str] = []
         if not is_git:
             if not allow_non_git:
@@ -566,25 +623,37 @@ class RepositoryRegistry:
                     code="non_git",
                 )
             warnings.append("registered path is not a Git repository")
-        redacted_count, _, symlink_escapes = self._scan_path(canonical)
-        if redacted_count:
-            warnings.append(f"{redacted_count} sensitive or excluded paths will be redacted")
-        if symlink_escapes:
-            warnings.append(f"{symlink_escapes} child symlink or junctions escape the registered root")
+        summary = self._scan_path(canonical) if scan else ScanSummary()
+        if summary.redacted_count:
+            warnings.append(
+                f"{summary.redacted_count} sensitive or excluded paths were observed and redacted"
+            )
+        if summary.symlink_escapes:
+            warnings.append(
+                f"{summary.symlink_escapes} child symlink or junctions escape the registered root"
+            )
+        if summary.scan_truncated:
+            warnings.append("repository scan reached its safety budget; counts are incomplete")
+        if summary.unreadable_directories:
+            warnings.append(f"{summary.unreadable_directories} directories could not be read")
         return RepositoryPreview(
-            canonical,
-            is_git,
-            git_root,
-            redacted_count,
-            symlink_escapes,
-            tuple(warnings),
+            canonical_path=canonical,
+            is_git=is_git,
+            git_root=git_root,
+            redacted_count=summary.redacted_count,
+            symlink_escapes=summary.symlink_escapes,
+            warnings=tuple(warnings),
+            omitted_count=summary.omitted_count,
+            visited_files=summary.visited_files,
+            visited_directories=summary.visited_directories,
+            unreadable_directories=summary.unreadable_directories,
+            scan_truncated=summary.scan_truncated,
         )
 
     def preview(self, value: str | Path, *, allow_non_git: bool = False) -> RepositoryPreview:
         """Validate a path without changing registry or repository files."""
 
-        with self._locked():
-            return self._prepare_path(value, allow_non_git=allow_non_git)
+        return self._prepare_path(value, allow_non_git=allow_non_git, scan=True)
 
     def add(
         self,
@@ -596,6 +665,9 @@ class RepositoryRegistry:
         notes: str | None = None,
     ) -> RepositoryRegistration:
         repository_id = validate_repository_id(repository_id)
+        # Validate before acquiring the registry lock. The filesystem scan is
+        # intentionally never performed while the registry is locked.
+        self._prepare_path(path, allow_non_git=allow_non_git, scan=False)
         with self._locked():
             repositories = self._load_unlocked()
             if repository_id in repositories:
@@ -603,7 +675,7 @@ class RepositoryRegistry:
                     f"repository ID is already registered: {repository_id}",
                     code="duplicate_id",
                 )
-            preview = self._prepare_path(path, allow_non_git=allow_non_git)
+            preview = self._prepare_path(path, allow_non_git=allow_non_git, scan=False)
             now = _utc_now()
             name = display_name if display_name is not None else preview.canonical_path.name
             if not name:
@@ -635,11 +707,52 @@ class RepositoryRegistry:
             return removed
 
     def authorized(self, repository_id: str) -> RepositoryRegistration:
+        """Backward-compatible alias for the complete authorization check."""
+
+        return self.resolve_authorized(repository_id)
+
+    def resolve_authorized(self, repository_id: str) -> RepositoryRegistration:
+        """Return a registration only after validating its live filesystem identity.
+
+        ``get`` intentionally remains a metadata-only operation.  Callers that
+        will read from a repository must use this method so disabled/read-only
+        flags, existence, directory identity, path policy, and Git-root
+        boundaries are checked at the point of use.
+        """
+
         registration = self.get(repository_id)
         if not registration.enabled:
-            raise RegistryError(f"repository is disabled: {repository_id}", code="forbidden")
+            raise RegistryError(f"repository is disabled: {repository_id}", code="disabled")
         if not registration.read:
-            raise RegistryError(f"repository read access is disabled: {repository_id}", code="forbidden")
+            raise RegistryError(
+                f"repository read access is disabled: {repository_id}",
+                code="read_denied",
+            )
+        stored_path = registration.canonical_path
+        try:
+            current_path = stored_path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise RegistryError(
+                f"registered repository is missing: {repository_id}",
+                code="missing",
+            ) from error
+        if not current_path.is_dir():
+            raise RegistryError(
+                f"registered repository is not a directory: {repository_id}",
+                code="not_directory",
+            )
+        if current_path != stored_path:
+            raise RegistryError(
+                f"registered repository root identity changed: {repository_id}",
+                code="redirected",
+            )
+        self._validate_canonical_path_policy(current_path)
+        is_git, git_root = self._git_details(current_path)
+        if is_git and git_root != current_path:
+            raise RegistryError(
+                "a Git subdirectory cannot be used as an authorized repository root",
+                code="git_subdirectory",
+            )
         return registration
 
     def doctor(self, repository_id: str) -> RepositoryHealth:
@@ -647,6 +760,7 @@ class RepositoryRegistry:
         stored_path = registration.canonical_path
         issues: list[str] = []
         warnings: list[str] = []
+        error_codes: list[str] = []
         try:
             current_path = stored_path.resolve(strict=True)
         except (OSError, RuntimeError):
@@ -654,7 +768,15 @@ class RepositoryRegistry:
         root_identity_ok = current_path == stored_path if current_path is not None else False
         available = current_path is not None and current_path.is_dir() and root_identity_ok
         if not available:
-            issues.append("registered path is missing or its root identity changed")
+            if current_path is None:
+                issues.append("registered path is missing")
+                error_codes.append("missing")
+            elif not current_path.is_dir():
+                issues.append("registered path is not a directory")
+                error_codes.append("not_directory")
+            else:
+                issues.append("registered path root identity changed")
+                error_codes.append("redirected")
         if not registration.enabled:
             warnings.append("repository is disabled")
         if not registration.read:
@@ -668,8 +790,24 @@ class RepositoryRegistry:
         redacted_count = 0
         omitted_count = 0
         symlink_escapes = 0
+        visited_files = 0
+        visited_directories = 0
+        unreadable_directories = 0
+        scan_truncated = False
+        path_policy_ok = True
         if available and current_path is not None:
+            try:
+                self._validate_canonical_path_policy(current_path)
+            except RegistryError as error:
+                issues.append(str(error))
+                error_codes.append(error.code)
+                path_policy_ok = False
+                available = False
+        if available and current_path is not None and path_policy_ok:
             is_git, git_root = self._git_details(current_path)
+            if is_git and git_root != current_path:
+                issues.append("registered path is a Git subdirectory, not the Git root")
+                error_codes.append("git_subdirectory")
             if is_git:
                 head = run_git(current_path, ("rev-parse", "HEAD"))
                 branch = run_git(current_path, ("symbolic-ref", "--short", "-q", "HEAD")) or None
@@ -677,11 +815,21 @@ class RepositoryRegistry:
                 dirty = bool(status)
             else:
                 warnings.append("registered path is not a Git repository")
-            redacted_count, omitted_count, symlink_escapes = self._scan_path(current_path)
+            summary = self._scan_path(current_path)
+            redacted_count = summary.redacted_count
+            omitted_count = summary.omitted_count
+            symlink_escapes = summary.symlink_escapes
+            visited_files = summary.visited_files
+            visited_directories = summary.visited_directories
+            unreadable_directories = summary.unreadable_directories
+            scan_truncated = summary.scan_truncated
             if symlink_escapes:
                 issues.append(f"{symlink_escapes} child symlink or junction escapes the registered root")
-            if omitted_count:
-                warnings.append(f"health scan bounded at {_MAX_HEALTH_FILES} files")
+                error_codes.append("symlink_escape")
+            if scan_truncated:
+                warnings.append("repository scan reached its safety budget; counts are incomplete")
+            if unreadable_directories:
+                warnings.append(f"{unreadable_directories} directories could not be read")
         return RepositoryHealth(
             repository_id=repository_id,
             available=available,
@@ -697,53 +845,104 @@ class RepositoryRegistry:
             symlink_escapes=symlink_escapes,
             issues=tuple(issues),
             warnings=tuple(warnings),
+            error_codes=tuple(dict.fromkeys(error_codes)),
+            visited_files=visited_files,
+            visited_directories=visited_directories,
+            unreadable_directories=unreadable_directories,
+            scan_truncated=scan_truncated,
         )
 
-    def _scan_path(self, root: Path) -> tuple[int, int, int]:
+    def _scan_path(self, root: Path) -> ScanSummary:
+        """Collect bounded, observed filesystem facts without following links."""
+
         redacted = 0
-        omitted = 0
         symlink_escapes = 0
-        scanned = 0
-        for current, directories, filenames in os.walk(root, topdown=True, followlinks=False):
-            current_path = Path(current)
-            safe_directories: list[str] = []
-            for name in sorted(directories):
-                child = current_path / name
+        visited_files = 0
+        visited_directories = 0
+        unreadable_directories = 0
+        scan_truncated = False
+        seen_files: set[tuple[int, int] | str] = set()
+        seen_directories: set[tuple[int, int] | str] = set()
+        pending: list[tuple[Path, int]] = [(root, 0)]
+
+        while pending:
+            current, depth = pending.pop()
+            if visited_directories >= self.scan_limits.max_directories:
+                scan_truncated = True
+                break
+            directory_identity = self._path_identity(current)
+            if directory_identity is not None and directory_identity in seen_directories:
+                continue
+            if directory_identity is not None:
+                seen_directories.add(directory_identity)
+            visited_directories += 1
+            try:
+                with os.scandir(current) as iterator:
+                    entries = sorted(list(iterator), key=lambda entry: entry.name.casefold())
+            except (OSError, PermissionError):
+                unreadable_directories += 1
+                continue
+
+            for entry in entries:
+                child = Path(entry.path)
                 relative = child.relative_to(root).as_posix()
-                if is_ignored_path(Path(relative) / "marker"):
+                try:
+                    entry_is_directory = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    unreadable_directories += 1
+                    continue
+                ignored_value: str | Path = Path(relative) / "marker" if entry_is_directory else relative
+                if is_ignored_path(ignored_value):
                     redacted += 1
                     continue
                 if _is_link_or_junction(child):
                     try:
                         resolved = child.resolve(strict=False)
-                    except RuntimeError:
+                    except (OSError, RuntimeError):
                         symlink_escapes += 1
                         continue
                     if not _is_within(root, resolved):
                         symlink_escapes += 1
-                        continue
-                    # Do not follow links even when they point back inside the
-                    # project: this keeps loops and duplicate traversal bounded.
                     continue
-                safe_directories.append(name)
-            directories[:] = safe_directories
-            for name in sorted(filenames):
-                relative = (current_path / name).relative_to(root).as_posix()
-                if is_ignored_path(relative):
-                    redacted += 1
-                    continue
-                child = current_path / name
-                if _is_link_or_junction(child):
-                    try:
-                        resolved = child.resolve(strict=False)
-                    except RuntimeError:
-                        symlink_escapes += 1
+                if entry_is_directory:
+                    if depth >= self.scan_limits.max_depth:
+                        scan_truncated = True
                         continue
-                    if not _is_within(root, resolved):
-                        symlink_escapes += 1
-                        continue
-                if scanned >= _MAX_HEALTH_FILES:
-                    omitted += 1
+                    if visited_directories + len(pending) >= self.scan_limits.max_directories:
+                        scan_truncated = True
+                        break
+                    pending.append((child, depth + 1))
                     continue
-                scanned += 1
-        return redacted, omitted, symlink_escapes
+                if visited_files >= self.scan_limits.max_files:
+                    scan_truncated = True
+                    break
+                file_identity = self._path_identity(child)
+                if file_identity is not None and file_identity in seen_files:
+                    continue
+                if file_identity is not None:
+                    seen_files.add(file_identity)
+                visited_files += 1
+            if visited_files >= self.scan_limits.max_files:
+                scan_truncated = True
+                break
+
+        return ScanSummary(
+            redacted_count=redacted,
+            omitted_count=0,
+            symlink_escapes=symlink_escapes,
+            visited_files=visited_files,
+            visited_directories=visited_directories,
+            unreadable_directories=unreadable_directories,
+            scan_truncated=scan_truncated,
+        )
+
+    @staticmethod
+    def _path_identity(path: Path) -> tuple[int, int] | str | None:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        identity = (stat_result.st_dev, stat_result.st_ino)
+        if identity != (0, 0):
+            return identity
+        return str(path).casefold() if sys.platform == "win32" else str(path)

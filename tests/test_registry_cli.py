@@ -101,6 +101,82 @@ class RepositoryRegistryCliTests(unittest.TestCase):
         result, _, error = self._run("repo", "show", "demo")
         self.assertEqual(result, 0, error)
 
+    def test_json_add_without_yes_is_one_confirmation_error_document(self) -> None:
+        with patch("builtins.input") as prompt:
+            result, output, error = self._run(
+                "repo",
+                "add",
+                "demo",
+                str(self.project),
+                "--allow-non-git",
+                "--format",
+                "json",
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(error, "")
+        prompt.assert_not_called()
+        self.assertEqual(json.loads(output), {
+            "error": {
+                "code": "confirmation_required",
+                "message": "explicit confirmation is required; pass --yes",
+            }
+        })
+        self.assertFalse(self.registry.exists())
+        self.assertFalse(self.registry.with_name("repositories.json.lock").exists())
+
+    def test_json_remove_without_yes_is_noninteractive_and_preserves_entry(self) -> None:
+        result, _, error = self._run(
+            "repo",
+            "add",
+            "demo",
+            str(self.project),
+            "--allow-non-git",
+            "--yes",
+        )
+        self.assertEqual(result, 0, error)
+        before = self.registry.read_bytes()
+        with patch("builtins.input") as prompt:
+            result, output, error = self._run(
+                "repo",
+                "remove",
+                "demo",
+                "--format",
+                "json",
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(error, "")
+        prompt.assert_not_called()
+        self.assertEqual(json.loads(output)["error"]["code"], "confirmation_required")
+        self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_json_registry_errors_include_stable_codes_on_stdout(self) -> None:
+        result, output, error = self._run(
+            "repo",
+            "add",
+            "../invalid",
+            str(self.project),
+            "--allow-non-git",
+            "--yes",
+            "--format",
+            "json",
+        )
+        self.assertEqual(result, 2)
+        self.assertEqual(error, "")
+        self.assertEqual(json.loads(output)["error"]["code"], "invalid_id")
+
+        result, output, error = self._run(
+            "repo",
+            "add",
+            "git-only",
+            str(self.project),
+            "--yes",
+            "--format",
+            "json",
+        )
+        self.assertEqual(result, 2)
+        self.assertEqual(error, "")
+        self.assertEqual(json.loads(output)["error"]["code"], "non_git")
+
 
 if __name__ == "__main__":
     unittest.main()
