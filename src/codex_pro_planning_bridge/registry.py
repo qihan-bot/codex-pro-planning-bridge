@@ -92,23 +92,30 @@ def _validate_timestamp(value: object, field: str) -> str:
     return value
 
 
-def validate_repository_id(repository_id: str) -> str:
-    """Validate a repository ID before it reaches persistence or path logic."""
+def normalize_repository_id(repository_id: str) -> str:
+    """Canonicalize and validate a repository ID before persistence."""
 
     if not isinstance(repository_id, str):
         raise RegistryError("repository ID must be a string", code="invalid_id")
-    if not REGISTRY_ID_PATTERN.fullmatch(repository_id):
+    normalized = repository_id.strip().casefold()
+    if not REGISTRY_ID_PATTERN.fullmatch(normalized):
         raise RegistryError(
             "repository ID must be 1-64 lowercase letters, digits, '.', '_' or '-' "
             "and must start with a letter or digit",
             code="invalid_id",
         )
-    if repository_id in RESERVED_REPOSITORY_IDS:
+    if normalized in RESERVED_REPOSITORY_IDS:
         raise RegistryError(
-            f"repository ID is reserved: {repository_id}",
+            f"repository ID is reserved: {normalized}",
             code="invalid_id",
         )
-    return repository_id
+    return normalized
+
+
+def validate_repository_id(repository_id: str) -> str:
+    """Validate and return the lowercase canonical repository ID."""
+
+    return normalize_repository_id(repository_id)
 
 
 def default_registry_path() -> Path:
@@ -140,6 +147,26 @@ def _is_within(root: Path, candidate: Path) -> bool:
     return True
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Detect symbolic links and Windows junctions across supported Python versions."""
+
+    if os.path.islink(path):
+        return True
+    junction_checker = getattr(path, "is_junction", None)
+    if callable(junction_checker):
+        try:
+            if junction_checker():
+                return True
+        except OSError:
+            return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    # FILE_ATTRIBUTE_REPARSE_POINT. Python 3.10 does not expose Path.is_junction.
+    return bool(attributes & 0x400)
+
+
 def _safe_chmod(path: Path, mode: int = 0o600) -> None:
     if os.name != "nt":
         try:
@@ -162,7 +189,9 @@ class RepositoryRegistration:
     notes: str | None = None
 
     def __post_init__(self) -> None:
-        validate_repository_id(self.repository_id)
+        normalized_id = validate_repository_id(self.repository_id)
+        if normalized_id != self.repository_id:
+            object.__setattr__(self, "repository_id", normalized_id)
         if not self.display_name.strip() or len(self.display_name) > 200:
             raise RegistryError("display name must contain 1-200 characters", code="invalid_entry")
         if not self.canonical_path.is_absolute():
@@ -189,7 +218,12 @@ class RepositoryRegistration:
 
     @classmethod
     def from_dict(cls, repository_id: str, payload: object) -> "RepositoryRegistration":
-        validate_repository_id(repository_id)
+        normalized_id = validate_repository_id(repository_id)
+        if normalized_id != repository_id:
+            raise RegistryError(
+                f"repository entry {repository_id!r} is not a canonical lowercase ID",
+                code="corrupt",
+            )
         if not isinstance(payload, dict):
             raise RegistryError(
                 f"repository entry {repository_id!r} must be an object",
@@ -247,6 +281,8 @@ class RepositoryPreview:
     canonical_path: Path
     is_git: bool
     git_root: Path | None
+    redacted_count: int = 0
+    symlink_escapes: int = 0
     warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -254,6 +290,8 @@ class RepositoryPreview:
             "canonical_path": str(self.canonical_path),
             "is_git": self.is_git,
             "git_root": str(self.git_root) if self.git_root else None,
+            "redacted_count": self.redacted_count,
+            "symlink_escapes": self.symlink_escapes,
             "warnings": list(self.warnings),
         }
 
@@ -438,7 +476,7 @@ class RepositoryRegistry:
         return self.list()
 
     def get(self, repository_id: str) -> RepositoryRegistration:
-        validate_repository_id(repository_id)
+        repository_id = validate_repository_id(repository_id)
         with self._locked():
             repositories = self._load_unlocked()
             try:
@@ -484,6 +522,15 @@ class RepositoryRegistry:
                 "credential and secret directories cannot be registered",
                 code="unsafe_path",
             )
+        canonical_parts = [part.casefold() for part in canonical.parts]
+        if any(
+            first == ".config" and second == "gcloud"
+            for first, second in zip(canonical_parts, canonical_parts[1:])
+        ):
+            raise RegistryError(
+                "credential and secret directories cannot be registered",
+                code="unsafe_path",
+            )
         if canonical.name.casefold() in {".env", ".git-credentials"}:
             raise RegistryError("secret paths cannot be registered", code="unsafe_path")
         return canonical
@@ -519,7 +566,19 @@ class RepositoryRegistry:
                     code="non_git",
                 )
             warnings.append("registered path is not a Git repository")
-        return RepositoryPreview(canonical, is_git, git_root, tuple(warnings))
+        redacted_count, _, symlink_escapes = self._scan_path(canonical)
+        if redacted_count:
+            warnings.append(f"{redacted_count} sensitive or excluded paths will be redacted")
+        if symlink_escapes:
+            warnings.append(f"{symlink_escapes} child symlink or junctions escape the registered root")
+        return RepositoryPreview(
+            canonical,
+            is_git,
+            git_root,
+            redacted_count,
+            symlink_escapes,
+            tuple(warnings),
+        )
 
     def preview(self, value: str | Path, *, allow_non_git: bool = False) -> RepositoryPreview:
         """Validate a path without changing registry or repository files."""
@@ -536,7 +595,7 @@ class RepositoryRegistry:
         allow_non_git: bool = False,
         notes: str | None = None,
     ) -> RepositoryRegistration:
-        validate_repository_id(repository_id)
+        repository_id = validate_repository_id(repository_id)
         with self._locked():
             repositories = self._load_unlocked()
             if repository_id in repositories:
@@ -562,7 +621,7 @@ class RepositoryRegistry:
             return registration
 
     def remove(self, repository_id: str) -> RepositoryRegistration:
-        validate_repository_id(repository_id)
+        repository_id = validate_repository_id(repository_id)
         with self._locked():
             repositories = self._load_unlocked()
             try:
@@ -654,7 +713,7 @@ class RepositoryRegistry:
                 if is_ignored_path(Path(relative) / "marker"):
                     redacted += 1
                     continue
-                if os.path.islink(child):
+                if _is_link_or_junction(child):
                     try:
                         resolved = child.resolve(strict=False)
                     except RuntimeError:
@@ -674,7 +733,7 @@ class RepositoryRegistry:
                     redacted += 1
                     continue
                 child = current_path / name
-                if os.path.islink(child):
+                if _is_link_or_junction(child):
                     try:
                         resolved = child.resolve(strict=False)
                     except RuntimeError:

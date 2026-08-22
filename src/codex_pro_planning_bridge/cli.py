@@ -410,8 +410,16 @@ def _print_repository_payload(payload: object, output_format: str) -> None:
                 health = payload["health"]
                 if isinstance(health, dict):
                     print(f"Health: {'PASS' if health.get('ok') else 'FAILED'}")
+                    print(f"Git: {health.get('is_git', False)}")
+                    print(f"HEAD: {health.get('head') or '(none)'}")
+                    print(f"Branch: {health.get('branch') or '(detached or none)'}")
+                    print(f"Dirty: {health.get('dirty')}")
+                    print(f"Redacted paths: {health.get('redacted_count', 0)}")
+                    print(f"Omitted paths: {health.get('omitted_count', 0)}")
                     for issue in health.get("issues", []):
                         print(f"- {issue}")
+                    for warning in health.get("warnings", []):
+                        print(f"Warning: {warning}")
             return
     if isinstance(payload, dict) and "repositories" in payload:
         repositories = payload["repositories"]
@@ -434,6 +442,9 @@ def _print_repository_payload(payload: object, output_format: str) -> None:
             print(f"Path: {health.get('canonical_path', '')}")
             print(f"Git: {health.get('is_git', False)}")
             print(f"Dirty: {health.get('dirty')}")
+            print(f"Redacted paths: {health.get('redacted_count', 0)}")
+            print(f"Omitted paths: {health.get('omitted_count', 0)}")
+            print(f"Symlink escapes: {health.get('symlink_escapes', 0)}")
             for warning in health.get("warnings", []):
                 print(f"Warning: {warning}")
             for issue in health.get("issues", []):
@@ -495,8 +506,10 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         if args.repo_command == "show":
             registration = registry.show(args.repository_id)
+            health = registry.doctor(args.repository_id)
             repository_show_payload = {
-                "repository": {"repository_id": registration.repository_id, **registration.to_dict()}
+                "repository": {"repository_id": registration.repository_id, **registration.to_dict()},
+                "health": health.to_dict(),
             }
             _print_repository_payload(
                 repository_show_payload,
