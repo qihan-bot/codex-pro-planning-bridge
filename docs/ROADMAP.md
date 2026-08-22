@@ -274,6 +274,83 @@ hardening release.
 
 ---
 
+# v0.4 ChatGPT Client Integration
+
+Status: Planned (`0.4.0-alpha.1`)
+
+Goal:
+
+Change the default experience from a CLI-first bridge into a universal plugin
+that uses ChatGPT Pro as the repository-grounded planning surface and Codex as
+the locally approved implementation and review surface.
+
+Target workflow:
+
+```text
+ChatGPT Pro plugin
+  ↓ read-only registered-repository MCP
+Validated Plan Capsule
+  ↓ human planning approval
+Codex plugin
+  ↓ local repository revalidation
+Hash-bound local approval
+  ↓
+Codex implementation and tests
+  ↓
+Plan Diff, symbol drift, and Project Memory
+```
+
+Features:
+
+- three focused Skills:
+  - `plan-project-with-pro`
+  - `implement-approved-plan`
+  - `review-implementation`
+- five read-only Repository MCP tools:
+  - `list_repositories`
+  - `get_repository_status`
+  - `prepare_planning_context`
+  - `validate_plan`
+  - `review_implementation`
+- per-user repository allowlist and `cpb repo` management CLI;
+- versioned Plan Capsule handoff from ChatGPT Pro to Codex;
+- one shared MCP service with Streamable HTTP and stdio transports;
+- ChatGPT developer-mode registration and Secure MCP Tunnel development path;
+- universal plugin packaging with `.app.json`, `.mcp.json`, Skills, and local marketplace testing;
+- continued use of v0.3.3 validation, approval, audit, snapshot, recovery, integrity, diff, and memory controls;
+- client integration, adversarial security, MCP Inspector, and end-to-end dogfood tests.
+
+Constraints:
+
+- no OpenAI API calls or API keys;
+- no ChatGPT webpage automation or scraping;
+- ChatGPT Pro MCP tools are read-only in v0.4;
+- MCP accepts repository IDs, never arbitrary filesystem paths;
+- conversational approval is not local implementation approval;
+- no custom interactive UI in the first alpha;
+- no public marketplace submission before dogfood, privacy, and security gates.
+
+Implementation phases:
+
+1. Repository Registry
+2. Plan Capsule
+3. MCP service core and schemas
+4. Five read-only tools
+5. stdio and Streamable HTTP transports
+6. surface-focused Skills
+7. plugin packaging and local marketplace
+8. ChatGPT developer-mode/tunnel integration
+9. Codex handoff, dogfood, and alpha release
+
+Authoritative planning documents:
+
+- `docs/V0.4_SPEC.md`
+- `docs/v0.4/README.md`
+- `docs/v0.4/IMPLEMENTATION_PLAN.md`
+- `docs/v0.4/ACCEPTANCE_CHECKLIST.md`
+
+---
+
 # v1.0 AI Software Architect Layer
 
 Final vision:
@@ -299,4 +376,3 @@ Capabilities:
 - continuous validation
 - project memory
 - engineering decision tracking
-
