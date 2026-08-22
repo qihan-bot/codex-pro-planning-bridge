@@ -18,6 +18,7 @@ from .loop import run_loop
 from .memory import ProjectMemory
 from .repository import resolve_repo, resolve_repo_path, write_text
 from .recovery import RecoveryEngine
+from .registry import RegistryError, RepositoryRegistry
 from .snapshot import SnapshotManager
 from .state import WorkflowStateStore
 from .validator import validate as validate_repository
@@ -38,6 +39,14 @@ def _add_collection_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_repo_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", default=".", help="repository directory (default: current directory)")
+
+
+def _add_registry_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--registry-path",
+        default=None,
+        help="local registry file override (defaults to the per-user config path)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -280,6 +289,48 @@ def build_parser() -> argparse.ArgumentParser:
     content_group.add_argument("--content", default=None)
     content_group.add_argument("--content-file", default=None)
 
+    registry_parser = subparsers.add_parser(
+        "repo",
+        help="manage the local repository allowlist",
+    )
+    registry_subparsers = registry_parser.add_subparsers(
+        dest="repo_command",
+        required=True,
+    )
+
+    repo_add = registry_subparsers.add_parser("add", help="register a repository path")
+    repo_add.add_argument("repository_id")
+    repo_add.add_argument("path")
+    repo_add.add_argument("--display-name", default=None)
+    repo_add.add_argument("--notes", default=None)
+    repo_add.add_argument("--allow-non-git", action="store_true")
+    repo_add.add_argument("--yes", action="store_true", help="skip the local confirmation prompt")
+    repo_add.add_argument("--format", choices=("text", "json"), default="text")
+    _add_registry_option(repo_add)
+
+    repo_list = registry_subparsers.add_parser("list", help="list registered repositories")
+    repo_list.add_argument("--format", choices=("text", "json"), default="text")
+    _add_registry_option(repo_list)
+
+    repo_show = registry_subparsers.add_parser("show", help="show one registered repository")
+    repo_show.add_argument("repository_id")
+    repo_show.add_argument("--format", choices=("text", "json"), default="text")
+    _add_registry_option(repo_show)
+
+    repo_remove = registry_subparsers.add_parser("remove", help="remove a repository registration")
+    repo_remove.add_argument("repository_id")
+    repo_remove.add_argument("--yes", action="store_true", help="skip the local confirmation prompt")
+    repo_remove.add_argument("--format", choices=("text", "json"), default="text")
+    _add_registry_option(repo_remove)
+
+    repo_doctor = registry_subparsers.add_parser(
+        "doctor",
+        help="check one registered repository without modifying it",
+    )
+    repo_doctor.add_argument("repository_id")
+    repo_doctor.add_argument("--format", choices=("text", "json"), default="text")
+    _add_registry_option(repo_doctor)
+
     return parser
 
 
@@ -343,7 +394,160 @@ def _print_event_records(records, output_format: str) -> None:
         )
 
 
+def _print_repository_payload(payload: object, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    if isinstance(payload, dict) and "repository" in payload:
+        repository = payload["repository"]
+        if isinstance(repository, dict):
+            print(f"Repository: {repository.get('repository_id', '(unknown)')}")
+            print(f"Display name: {repository.get('display_name', '')}")
+            print(f"Path: {repository.get('canonical_path', '')}")
+            print(f"Enabled: {repository.get('enabled', False)}")
+            print(f"Read: {repository.get('read', False)}")
+            if "health" in payload:
+                health = payload["health"]
+                if isinstance(health, dict):
+                    print(f"Health: {'PASS' if health.get('ok') else 'FAILED'}")
+                    print(f"Git: {health.get('is_git', False)}")
+                    print(f"HEAD: {health.get('head') or '(none)'}")
+                    print(f"Branch: {health.get('branch') or '(detached or none)'}")
+                    print(f"Dirty: {health.get('dirty')}")
+                    print(f"Observed redacted paths: {health.get('redacted_count', 0)}")
+                    print(f"Observed omitted paths: {health.get('omitted_count', 0)}")
+                    print(f"Scan truncated: {health.get('scan_truncated', False)}")
+                    for issue in health.get("issues", []):
+                        print(f"- {issue}")
+                    for warning in health.get("warnings", []):
+                        print(f"Warning: {warning}")
+            return
+    if isinstance(payload, dict) and "repositories" in payload:
+        repositories = payload["repositories"]
+        print(f"Repositories: {len(repositories) if isinstance(repositories, list) else 0}")
+        if isinstance(repositories, list):
+            for repository in repositories:
+                if not isinstance(repository, dict):
+                    continue
+                enabled = "enabled" if repository.get("enabled") else "disabled"
+                readable = "read" if repository.get("read") else "no-read"
+                print(
+                    f"- {repository.get('repository_id', '(unknown)')} "
+                    f"[{enabled}, {readable}]: {repository.get('canonical_path', '')}"
+                )
+            return
+    if isinstance(payload, dict) and "health" in payload:
+        health = payload["health"]
+        if isinstance(health, dict):
+            print(f"Repository health: {'PASS' if health.get('ok') else 'FAILED'}")
+            print(f"Path: {health.get('canonical_path', '')}")
+            print(f"Git: {health.get('is_git', False)}")
+            print(f"Dirty: {health.get('dirty')}")
+            print(f"Observed redacted paths: {health.get('redacted_count', 0)}")
+            print(f"Observed omitted paths: {health.get('omitted_count', 0)}")
+            print(f"Symlink escapes: {health.get('symlink_escapes', 0)}")
+            print(f"Scan truncated: {health.get('scan_truncated', False)}")
+            for warning in health.get("warnings", []):
+                print(f"Warning: {warning}")
+            for issue in health.get("issues", []):
+                print(f"Issue: {issue}")
+            return
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _confirm(prompt: str) -> bool:
+    try:
+        answer = input(prompt).strip().casefold()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "repo":
+        registry = RepositoryRegistry(args.registry_path)
+        if args.repo_command == "add":
+            if args.format == "json" and not args.yes:
+                raise RegistryError(
+                    "explicit confirmation is required; pass --yes",
+                    code="confirmation_required",
+                )
+            preview = registry.preview(args.path, allow_non_git=args.allow_non_git)
+            if not args.yes:
+                print(f"Register repository {args.repository_id} at {preview.canonical_path}")
+                for warning in preview.warnings:
+                    print(f"Warning: {warning}")
+                if not _confirm("Continue? [y/N] "):
+                    print("Registration cancelled.")
+                    return 1
+            registration = registry.add(
+                args.repository_id,
+                args.path,
+                display_name=args.display_name,
+                allow_non_git=args.allow_non_git,
+                notes=args.notes,
+            )
+            health = registry.doctor(args.repository_id)
+            repository_payload = {
+                "repository": {"repository_id": registration.repository_id, **registration.to_dict()},
+                "health": health.to_dict(),
+            }
+            _print_repository_payload(
+                repository_payload,
+                args.format,
+            )
+            return 0
+        if args.repo_command == "list":
+            repositories = registry.list()
+            repository_list_payload = {
+                "count": len(repositories),
+                "repositories": [
+                    {"repository_id": item.repository_id, **item.to_dict()}
+                    for item in repositories
+                ],
+            }
+            _print_repository_payload(
+                repository_list_payload,
+                args.format,
+            )
+            return 0
+        if args.repo_command == "show":
+            registration = registry.show(args.repository_id)
+            health = registry.doctor(args.repository_id)
+            repository_show_payload = {
+                "repository": {"repository_id": registration.repository_id, **registration.to_dict()},
+                "health": health.to_dict(),
+            }
+            _print_repository_payload(
+                repository_show_payload,
+                args.format,
+            )
+            return 0
+        if args.repo_command == "remove":
+            if args.format == "json" and not args.yes:
+                raise RegistryError(
+                    "explicit confirmation is required; pass --yes",
+                    code="confirmation_required",
+                )
+            registration = registry.show(args.repository_id)
+            if not args.yes:
+                if not _confirm(f"Remove repository {registration.repository_id}? [y/N] "):
+                    print("Removal cancelled.")
+                    return 1
+            removed = registry.remove(args.repository_id)
+            repository_remove_payload = {
+                "removed": removed.repository_id,
+                "canonical_path": str(removed.canonical_path),
+            }
+            _print_repository_payload(repository_remove_payload, args.format)
+            return 0
+        if args.repo_command == "doctor":
+            health = registry.doctor(args.repository_id)
+            repository_health_payload = {"health": health.to_dict()}
+            _print_repository_payload(repository_health_payload, args.format)
+            return 0 if health.ok else 1
+        raise AssertionError(f"unknown repository command: {args.repo_command}")
+
     if args.command == "init":
         artifacts = collect_context(args.repo, args.output_dir)
         memory = ProjectMemory(args.repo)
@@ -716,5 +920,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _run(args)
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        if getattr(args, "command", None) == "repo" and getattr(args, "format", "text") == "json":
+            error_code = getattr(error, "code", None)
+            if not isinstance(error_code, str) or not error_code:
+                error_code = "io_error" if isinstance(error, OSError) else "runtime_error"
+            print(
+                json.dumps(
+                    {"error": {"code": error_code, "message": str(error)}},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 2

@@ -276,7 +276,7 @@ hardening release.
 
 # v0.4 ChatGPT Client Integration
 
-Status: Planned (`0.4.0-alpha.1`)
+Status: In progress — Phase 1 Repository Registry (`feat/v0.4-repository-registry`)
 
 Goal:
 
@@ -341,6 +341,11 @@ Implementation phases:
 7. plugin packaging and local marketplace
 8. ChatGPT developer-mode/tunnel integration
 9. Codex handoff, dogfood, and alpha release
+
+Phase 1 implementation is intentionally stopped at its Draft PR review gate.
+It adds only the local versioned allowlist and `cpb repo` management CLI;
+MCP, Plan Capsule, Skills, packaging, and ChatGPT client integration remain
+later phases.
 
 Authoritative planning documents:
 
